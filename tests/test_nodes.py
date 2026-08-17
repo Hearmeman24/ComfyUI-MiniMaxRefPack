@@ -517,7 +517,7 @@ def test_debug_carries_the_rendered_payload_and_the_settings(fake_folder_paths, 
     )
     debug = out[refs.slot_index("debug")]
 
-    assert "use_openrouter: True" in debug
+    assert "prompt_provider: openrouter" in debug
     assert "width: 1344" in debug and "height: 768" in debug and "length_seconds: 12.25" in debug
     assert "<Picture 1> i1.jpg" in debug
     assert "packaged default" in debug
@@ -527,12 +527,18 @@ def test_debug_carries_the_rendered_payload_and_the_settings(fake_folder_paths, 
     assert out[refs.slot_index("prompt")] == "a prompt"
 
 
-def test_debug_reports_the_opt_out_and_makes_no_call(fake_folder_paths, monkeypatch):
+def test_a_legacy_use_openrouter_false_still_passes_through(fake_folder_paths, monkeypatch):
+    """The 0.3.1 opt-out, driven the way an old API client still drives it.
+
+    `use_openrouter=False` was replaced by `prompt_provider="none"`, but a stored API
+    prompt or a script keeps sending the boolean. The server must honour it rather than
+    quietly running a paid call the user switched off.
+    """
     _touch(fake_folder_paths, "i1.jpg")
     monkeypatch.setattr(nodes.media, "load_image", lambda path, crop=None, max_edge=0: f"IMG:{path}")
 
     def boom(*a, **k):
-        raise AssertionError("write_prompt must not run when use_openrouter is off")
+        raise AssertionError("write_prompt must not run when auto-prompting is off")
 
     monkeypatch.setattr(nodes.prompt, "write_prompt", boom, raising=False)
 
@@ -543,10 +549,11 @@ def test_debug_reports_the_opt_out_and_makes_no_call(fake_folder_paths, monkeypa
     )
     debug = out[refs.slot_index("debug")]
 
-    assert "use_openrouter: False" in debug
-    assert "OpenRouter is OFF" in debug
+    assert "prompt_provider: none" in debug
+    assert "Auto-prompting is OFF" in debug
     assert "passed straight through" in debug
-    assert "--- payload sent to OpenRouter ---" not in debug
+    assert "--- payload sent to" not in debug
+    assert out[refs.slot_index("prompt")] == "passed straight through"
 
 
 def test_debug_reports_unspecified_dimensions(fake_folder_paths, monkeypatch):
@@ -672,9 +679,20 @@ def test_the_cap_defaults_to_2048_when_the_widget_is_absent(fake_folder_paths, m
 
 def test_the_cap_is_declared_last_so_old_workflows_restore_unchanged():
     """Widgets restore POSITIONALLY - a new input anywhere but the end re-points every
-    saved value in a workflow written by an older build."""
-    optional = list(nodes.MiniMaxH3ReferencePack.INPUT_TYPES()["optional"])
-    assert optional[-1] == "max_reference_edge"
+    saved value in a workflow written by an older build.
+
+    Pinning the whole order, not just the last name: that is what the rule actually says,
+    and it catches an insertion in the middle, which is the failure that matters. The one
+    deliberate exception is prompt_provider, which REPLACED use_openrouter in its own slot
+    rather than being appended - a type change in place, covered by the migration tests.
+    """
+    spec = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()
+    assert list(spec["required"]) + list(spec["optional"]) == [
+        "direction", "references_json", "system_prompt", "prompt_provider",
+        "openrouter_api_key", "openrouter_model", "reasoning_effort", "api_base",
+        "local_model_slug", "job_type", "width", "height", "length_seconds",
+        "max_reference_edge",
+    ]
 
 
 def test_the_cap_never_reaches_the_video_loader(fake_folder_paths, monkeypatch):

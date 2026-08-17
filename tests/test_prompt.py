@@ -635,7 +635,11 @@ def test_render_payload_reports_the_jpeg_mime(monkeypatch, tmp_path):
     content = prompt._build_content(ReferenceSet([img("a.jpg")]), str(tmp_path), "direction")
 
     rendered = prompt.render_payload({"messages": [{"role": "user", "content": content}]})
-    assert "[image/jpeg, ~" in rendered
+    assert "image_url \u00b7 image/jpeg" in rendered
+    # The base64 is stubbed, but the real data: prefix stays so the reader sees the
+    # actual wire shape rather than a summary of it.
+    assert "data:image/jpeg;base64,<BASE64_STRING>" in rendered
+    assert prompt.BASE64_PLACEHOLDER in rendered
 
 
 # ---- write_prompt: the full round trip ----------------------------------------
@@ -868,7 +872,7 @@ def test_debug_shows_the_user_message_before_the_system_prompt(monkeypatch, tmp_
         api_key="k", model=prompt.DEFAULT_MODEL, system_prompt="THE SYSTEM RULES", debug=sink,
     )
     text = sink[0]
-    assert text.index("===== USER MESSAGE =====") < text.index("===== SYSTEM MESSAGE =====")
+    assert text.index("===== USER MESSAGE") < text.index("===== SYSTEM MESSAGE")
     assert text.index("MY DIRECTION HERE") < text.index("THE SYSTEM RULES")
 
     # ...but the wire order is unchanged: system is still messages[0].
@@ -1013,7 +1017,9 @@ def test_write_prompt_logs_the_call_and_its_latency(monkeypatch, tmp_path, caplo
         )
 
     lines = [r.getMessage() for r in caplog.records if r.name == "MiniMaxRefPack"]
-    call = next(ln for ln in lines if "event=openrouter" in ln)
+    # event=chat, not event=openrouter: the same call can now go to a local server, and a
+    # log line that names the wrong destination is worse than a generic one.
+    call = next(ln for ln in lines if "event=chat" in ln)
     assert "model=m" in call
     assert "status=200" in call
     assert "ms=" in call
@@ -1036,7 +1042,8 @@ def test_a_failed_openrouter_call_is_logged_as_a_failure(monkeypatch, tmp_path, 
             )
 
     lines = [r.getMessage() for r in caplog.records if r.name == "MiniMaxRefPack"]
-    assert any("event=openrouter" in ln and "status=429" in ln for ln in lines)
+    assert any("event=chat" in ln and "status=429" in ln for ln in lines)
+    assert any("endpoint=openrouter" in ln for ln in lines)
 
 
 # ---- videos go whole, not as sampled frames -------------------------------------

@@ -7,8 +7,8 @@ MiniMax has a documented task type for exactly this: `video editing`. So a repla
 Your input is one user message containing:
 
 - a block headed USER DIRECTION — which thing in the plate is replaced, and what replaces it;
-- a Reference manifest listing every attached asset with the exact tag MiniMax will give it;
-- the assets themselves, each preceded by a label line reading `image_reference <Picture N>`, `video_reference <Video N>` or `audio_reference <Audio N>`.
+- a listing of every attached asset with the exact tag MiniMax will give it, headed either `Reference manifest:` (one `<Tag>: filename` line per asset) or `REFERENCES` (grouped `Images:` / `Videos:` / `Audio:`, filenames on a single trailing `files:` line);
+- the assets themselves, each preceded by a label line: the long form `image_reference <Picture N>` / `video_reference <Video N>` / `audio_reference <Audio N>`, or the short form `<Picture N>:`. One label can cover a RUN of images when it says so.
 
 Return the prompt and nothing else. No preamble, no explanation, no markdown fences, no commentary.
 
@@ -18,7 +18,7 @@ The only legal tags are `<Picture N>`, `<Video N>`, `<Audio N>`, `<Subject N>` �
 
 === WHAT TO WORK OUT BEFORE WRITING ===
 
-Read the video's sampled frames and the reference image, then settle:
+Read the plate video and the reference image, then settle:
 
 - WHAT IS BEING REPLACED — name it concretely as it appears in the plate, not "the object".
 - WHAT REPLACES IT — the image's subject in real detail: shape, proportion, material, finish, colour, any logo, label or marking, and which way round it reads.
@@ -27,6 +27,18 @@ Read the video's sampled frames and the reference image, then settle:
 - THE PLATE'S OPTICS AND LIGHT — shot size, depth of field, motion blur, key direction and softness, grade.
 
 Everything you write must be traceable to the references or the direction. Do not invent a logo the image doesn't have, or a camera move the plate doesn't have.
+
+=== WHEN A REFERENCE WAS WITHHELD ===
+
+Some endpoints cannot accept video or audio, and the manifest says so on the tag's own line when it happens. Those lines override everything above.
+
+**A run of images under one label is ONE asset.** A label reading `<Video N> - the next K images are still frames from ONE video, in playback order. They are not separate pictures.` governs every image up to the next label. Those K images ARE `<Video N>`. Never give them `<Picture>` numbers and never count them as separate references.
+
+`<Video N> (K still frames, no sound)` in the listing, or `(<Video N>: sent as K still frames, not the clip …)` — the plate reached you as K stills in playback order, with no sound. HOW THE TARGET MOVES and THE PLATE'S OPTICS must then be written only from what consecutive stills actually show, and where the stills cannot settle a question, say nothing about it rather than guessing. Motion blur, speed, path and camera movement are the first things to go missing; do not assert them from a still.
+
+`<Audio N> (not sent)` in the listing, or `(<Audio N>: … NOT sent …)` — you did not hear it. Give it no entry and no retention line, and invent no voice, delivery, music or ambience for it. The tag stays reserved so numbering matches the graph.
+
+Write the same six sections at the same length either way. You are working from less, not writing less.
 
 === OUTPUT FORMAT — SIX SECTIONS, THIS ORDER, THESE NAMES ===
 

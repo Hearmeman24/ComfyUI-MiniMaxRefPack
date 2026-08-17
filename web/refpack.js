@@ -89,6 +89,113 @@
 import { app } from "../../scripts/app.js";
 
 const NODE_NAME = "MiniMaxH3ReferencePack";
+
+// ---------------------------------------------------------------------------
+// 0.3.1 -> 0.3.2 widget migration.
+//
+// `use_openrouter` was a BOOLEAN. `prompt_provider` is a combo in the SAME slot,
+// because appending it instead would have re-pointed every widget after it - the
+// exact class of bug 0.3.1 shipped and fixed. litegraph restores widgets_values
+// positionally and does not type-check, so a workflow saved at 0.3.1 hands the
+// combo a raw `true`, which then fails validation at queue time.
+//
+// configure() applies widgets_values BEFORE calling onConfigure, so by the time we
+// run the wrong value is already sitting on the widget and this is a repair rather
+// than an interception. That is fine and is why it is written this way: one place,
+// after the fact, no hooking of litegraph internals.
+//
+// The block between the two MMRP-MIGRATE markers is extracted and executed by
+// tests/test_migration.py under node. Keep the markers, and keep this function
+// free of imports and DOM access so it stays runnable in isolation.
+// >>> MMRP-MIGRATE
+const PROVIDER_VALUES = ["openrouter", "local", "none"];
+
+function migrateProviderValue(raw) {
+    // Mirrors endpoint.normalize_provider in Python. Both exist on purpose: this one
+    // fixes the graph the user is looking at, the Python one catches an API client
+    // that never loaded a browser. Total by design - an unknown value resolves to the
+    // default rather than throwing, because a broken workflow that will not queue is
+    // worse than a workflow that quietly writes its prompt the old way.
+    if (raw === true) return "openrouter";
+    if (raw === false) return "none";
+    const text = String(raw ?? "").trim().toLowerCase();
+    if (PROVIDER_VALUES.includes(text)) return text;
+    if (text === "true") return "openrouter";
+    if (text === "false") return "none";
+    return "openrouter";
+}
+
+function migrateProviderWidget(widget) {
+    // Returns true when it changed something, so the caller can log it once.
+    if (!widget) return false;
+    const migrated = migrateProviderValue(widget.value);
+    if (widget.value === migrated) return false;
+    widget.value = migrated;
+    return true;
+}
+
+// --- 0.3.3 reorder -------------------------------------------------------------
+//
+// widgets_values is a positional array, so the declaration order in nodes.py is a wire
+// format. 0.3.3 regrouped the widgets by decision flow, which means every array saved
+// before it now decodes into the wrong widgets - width into prompt_provider, and so on.
+//
+// Detection is by VALUE SHAPE rather than by properties.ver. A graph can reach us
+// without a ver (hand-edited, older frontend, copied node), and being wrong here is
+// worse than the bug it fixes: it would silently scramble a workflow that was fine.
+// Length plus the type at the provider slot identifies each layout unambiguously.
+const ORDER_0_3_1 = [
+    "direction", "openrouter_api_key", "openrouter_model", "references_json",
+    "system_prompt", "width", "height", "length_seconds", "prompt_provider",
+    "reasoning_effort", "job_type", "max_reference_edge",
+];
+const ORDER_0_3_2 = ORDER_0_3_1.concat(["api_base", "local_model_slug"]);
+const ORDER_0_3_3 = [
+    "direction", "references_json", "system_prompt", "prompt_provider",
+    "openrouter_api_key", "openrouter_model", "reasoning_effort", "api_base",
+    "local_model_slug", "job_type", "width", "height", "length_seconds",
+    "max_reference_edge",
+];
+
+function detectLayout(values) {
+    if (!Array.isArray(values)) return null;
+    // 0.3.3 already: slot 3 holds a provider string.
+    if (PROVIDER_VALUES.includes(String(values[3] ?? "").trim().toLowerCase())) {
+        return ORDER_0_3_3;
+    }
+    // 0.3.1: use_openrouter was a boolean at slot 8. 0.3.2: a provider string there.
+    const slot8 = values[8];
+    if (typeof slot8 === "boolean") return ORDER_0_3_1;
+    if (PROVIDER_VALUES.includes(String(slot8 ?? "").trim().toLowerCase())) {
+        return values.length > 12 ? ORDER_0_3_2 : ORDER_0_3_1;
+    }
+    return null;   // unrecognised: leave it alone rather than guess
+}
+
+function remapWidgetValues(values) {
+    // -> {name: value} for whatever layout this array was written in, or null if the
+    // array is not one we recognise. Names absent from the old layout simply do not
+    // appear, so the caller leaves those widgets at their defaults.
+    const order = detectLayout(values);
+    if (!order) return null;
+    const out = {};
+    for (let i = 0; i < order.length && i < values.length; i++) {
+        out[order[i]] = values[i];
+    }
+    // The old `model` slot is this pack's openrouter_model; the old generic override is
+    // the local slug. Both renames happened in 0.3.3 alongside the reorder.
+    if (out.model !== undefined && out.openrouter_model === undefined) {
+        out.openrouter_model = out.model;
+    }
+    if (out.model_override !== undefined && out.local_model_slug === undefined) {
+        out.local_model_slug = out.model_override;
+    }
+    if (out.prompt_provider !== undefined) {
+        out.prompt_provider = migrateProviderValue(out.prompt_provider);
+    }
+    return out;
+}
+// <<< MMRP-MIGRATE
 const KINDS = ["image", "video", "audio"];
 const CAPS = { image: 9, video: 3, audio: 3 };
 const SECTION_LABEL = { image: "Images", video: "Videos", audio: "Audio" };
@@ -436,6 +543,20 @@ async function apiSystemPromptDefault() {
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const data = await res.json();
     return data.default || "";
+}
+
+// Deliberately asks the SERVER to probe rather than probing from here. Two reasons, and
+// the first is the one that matters: `localhost` has to mean whatever the ComfyUI process
+// can reach, so a Dockerised or remote ComfyUI gets told the truth about its own network
+// instead of about the machine this browser happens to be sitting on. The second is that
+// a local LLM server has no reason to send CORS headers, so the browser could open the
+// socket and still not be allowed to read the answer.
+async function apiDetectServers(base) {
+    const qs = base ? `?base=${encodeURIComponent(base)}` : "";
+    const res = await fetch(`/minimax_refpack/detect${qs}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `detect failed: ${res.status}`);
+    return data.servers || [];
 }
 
 // One probe per filename, cached module-wide and reused across every redraw (a
@@ -1447,6 +1568,18 @@ function buildCustomBlock(node) {
     loadConfigBtn.onclick = () => openLoadConfigPanel(node, loadConfigBtn);
     uploadRow.appendChild(loadConfigBtn);
 
+    const localBtn = document.createElement("button");
+    localBtn.className = "mmrp-btn mmrp-upload-btn mmrp-local-btn";
+    localBtn.textContent = "Local LLM";
+    localBtn.title = "Find an OpenAI-compatible server on this machine and use it to write prompts";
+    localBtn.onclick = () => openLocalServerModal(node, localBtn);
+    uploadRow.appendChild(localBtn);
+    // Only meaningful while prompt_provider is `local`, so it is hidden otherwise rather
+    // than sitting there inert. The row is nowrap and content-sized, so removing it from
+    // layout just shortens the group; the node's fixed height is unaffected.
+    node._mmrpLocalBtn = localBtn;
+    syncLocalBtn(node);
+
     const gearBtn = document.createElement("button");
     gearBtn.className = "mmrp-btn mmrp-gear-btn";
     gearBtn.textContent = "⚙";
@@ -2210,6 +2343,216 @@ function openEditModal(node, kind, index) {
 // point without losing their in-progress edits by opening/closing the modal.
 // ---------------------------------------------------------------------------
 
+// Show the Local LLM button only while prompt_provider is `local`. Called from three
+// places because a combo can change three ways: the user clicks it, a saved graph
+// restores it, or applyPick() sets it from the picker itself.
+// REVERSIBLE, unlike hideWidget(): that one installs getter-only accessors and is a
+// one-way door, which is right for the three permanently-hidden widgets and wrong here.
+// These come back when the provider changes, so the real type is stashed and restored.
+// >>> MMRP-VISIBILITY
+function setWidgetVisible(w, visible) {
+    if (!w) return;
+    if (w._mmrpType === undefined) {
+        w._mmrpType = w.type;
+        w._mmrpDraw = w.draw;      // usually undefined: litegraph draws by type
+    }
+    try {
+        w.type = visible ? w._mmrpType : "hidden";
+        w.hidden = !visible;
+        if (!w.options) w.options = {};
+        w.options.hidden = !visible;
+        // [0,0] removes the row from litegraph's layout, which is what lets fixedSize()
+        // shrink the node by exactly the hidden rows on the next pass.
+        w.computeSize = visible ? undefined : () => [0, 0];
+        // Load-bearing, and its absence was a real bug (2026-08-17): zero height keeps a
+        // widget out of the LAYOUT but not out of the PAINT. Litegraph kept drawing the
+        // hidden ones at their last_y from when they were visible, so `api_base` painted
+        // its URL straight over the `reasoning_effort` row. Suppress the paint, and drop
+        // the stale coordinate so nothing can be drawn or hit-tested at it either.
+        w.draw = visible ? w._mmrpDraw : () => {};
+        if (!visible) w.last_y = undefined;
+    } catch (_) {
+        // Some frontend builds make these reactive accessors. Degrade to "always shown"
+        // rather than throwing mid-configure and aborting the workflow load.
+    }
+}
+
+// reasoning_effort is OpenRouter-only (endpoint.sends_reasoning), so it hides with the
+// rest of that group. A dropdown that silently does nothing on `local` is the same trap
+// that let a local model id sit in a field OpenRouter then read.
+const PROVIDER_FIELDS = {
+    openrouter: ["openrouter_api_key", "openrouter_model", "reasoning_effort"],
+    local: ["api_base", "local_model_slug"],
+};
+// <<< MMRP-VISIBILITY
+
+function syncLocalBtn(node) {
+    const w = widgetByName(node, "prompt_provider");
+    const provider = migrateProviderValue(w ? w.value : undefined);
+
+    const btn = node?._mmrpLocalBtn;
+    if (btn) btn.style.display = provider === "local" ? "" : "none";
+
+    // A field the run will ignore is worse than absent: it invites you to fill it in and
+    // then silently does nothing with it, which is exactly how a local model id ended up
+    // being posted to OpenRouter. `none` hides both groups - it calls nobody.
+    for (const [name, fields] of Object.entries(PROVIDER_FIELDS)) {
+        for (const field of fields) {
+            setWidgetVisible(widgetByName(node, field), provider === name);
+        }
+    }
+    // last_y only settles after litegraph's next layout pass, so re-assert on the frame
+    // after rather than reading a stale height now.
+    if (node.setSize) {
+        setTimeout(() => {
+            try {
+                node.setSize(fixedSize(node));
+                app.graph?.setDirtyCanvas(true, true);
+            } catch (_) {}
+        }, 0);
+    }
+}
+
+// litegraph gives a combo widget its own callback; wrapping it is how we hear the user
+// changing the value. Guarded against double-wrapping because onNodeCreated can run more
+// than once for a node across a paste or an undo, and a chain of wrappers would fire the
+// original callback once per wrap.
+function watchProviderWidget(node) {
+    const w = widgetByName(node, "prompt_provider");
+    if (!w || w._mmrpWatched) return;
+    const orig = w.callback;
+    w.callback = function (...args) {
+        const out = orig ? orig.apply(this, args) : undefined;
+        syncLocalBtn(node);
+        return out;
+    };
+    w._mmrpWatched = true;
+}
+
+
+// Writes a native widget the way litegraph expects: value first, then its callback, so
+// anything watching that widget (serialization, other extensions) sees the change rather
+// than a value that appeared behind its back.
+function setWidget(node, name, value) {
+    const w = widgetByName(node, name);
+    if (!w) return false;
+    w.value = value;
+    if (w.callback) w.callback(value);
+    return true;
+}
+
+
+// Answers "how do I know the api_base?" by not making the user answer it. Sweeps the
+// known local ports server-side, lists what actually replied, and writes all three
+// widgets from one click - provider, URL and model id together, because getting two of
+// the three right still fails at queue time with a 404 nobody can read.
+function openLocalServerModal(node, anchorBtn) {
+    const overlay = document.createElement("div");
+    overlay.className = "mmrp-overlay";
+    overlay.onclick = (e) => {
+        if (e.target === overlay) overlay.remove();
+    };
+
+    const modal = document.createElement("div");
+    modal.className = "mmrp-modal";
+    overlay.appendChild(modal);
+
+    const header = document.createElement("div");
+    header.className = "mmrp-modal-header";
+    header.textContent = "Local LLM";
+    modal.appendChild(header);
+
+    const hint = document.createElement("div");
+    hint.className = "mmrp-modal-hint";
+    hint.textContent = "Looking for a server on this machine...";
+    modal.appendChild(hint);
+
+    const list = document.createElement("div");
+    list.className = "mmrp-server-list";
+    modal.appendChild(list);
+
+    const applyPick = (base, model) => {
+        setWidget(node, "prompt_provider", "local");
+        setWidget(node, "api_base", base);
+        setWidget(node, "local_model_slug", model);
+        syncLocalBtn(node);
+        overlay.remove();
+        if (anchorBtn) {
+            const original = anchorBtn.textContent;
+            anchorBtn.textContent = "Using local ✓";
+            setTimeout(() => { anchorBtn.textContent = original; }, 2000);
+        }
+        app.graph?.setDirtyCanvas(true, true);
+    };
+
+    const render = (servers) => {
+        list.replaceChildren();
+        if (!servers.length) {
+            hint.textContent =
+                "No OpenAI-compatible server answered on this machine. Start LM Studio " +
+                "(Developer tab), or `ollama serve`, then Rescan. If your server runs " +
+                "somewhere else, type its URL into api_base by hand.";
+            return;
+        }
+        hint.textContent =
+            "Pick the model that should write your prompts. Videos will be sent as " +
+            "still frames and audio will not be sent at all.";
+        for (const s of servers) {
+            const group = document.createElement("div");
+            group.className = "mmrp-server-group";
+
+            const title = document.createElement("div");
+            title.className = "mmrp-server-title";
+            title.textContent = `${s.label} — ${s.base}`;
+            group.appendChild(title);
+
+            if (!s.models.length) {
+                const empty = document.createElement("div");
+                empty.className = "mmrp-server-empty";
+                empty.textContent = "answering, but no model is loaded";
+                group.appendChild(empty);
+            }
+            for (const m of s.models) {
+                const row = document.createElement("button");
+                row.className = "mmrp-btn mmrp-server-model";
+                row.textContent = m;
+                row.onclick = () => applyPick(s.base, m);
+                group.appendChild(row);
+            }
+            list.appendChild(group);
+        }
+    };
+
+    const sweep = () => {
+        hint.textContent = "Looking for a server on this machine...";
+        list.replaceChildren();
+        apiDetectServers()
+            .then(render)
+            .catch((e) => { hint.textContent = `Could not scan: ${e.message}`; });
+    };
+
+    const footer = document.createElement("div");
+    footer.className = "mmrp-modal-footer";
+
+    const rescanBtn = document.createElement("button");
+    rescanBtn.className = "mmrp-btn";
+    rescanBtn.textContent = "Rescan";
+    rescanBtn.onclick = sweep;
+
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "mmrp-btn mmrp-btn-primary";
+    closeBtn.textContent = "Close";
+    closeBtn.onclick = () => overlay.remove();
+
+    footer.appendChild(rescanBtn);
+    footer.appendChild(closeBtn);
+    modal.appendChild(footer);
+
+    document.body.appendChild(overlay);
+    sweep();
+}
+
+
 function openSystemPromptModal(node) {
     const systemPromptWidget = widgetByName(node, "system_prompt");
 
@@ -2445,12 +2788,38 @@ app.registerExtension({
 
             installSizeGuards(node);
             installSelectionHandlers(node);
+            watchProviderWidget(node);
+            syncLocalBtn(node);
             renderNodeBody(node);
             syncReferencesWidget(node);
 
             const origOnConfigure = node.onConfigure;
             node.onConfigure = function (info) {
                 const out = origOnConfigure ? origOnConfigure.apply(this, arguments) : undefined;
+                // configure() has just applied widgets_values POSITIONALLY, which for any
+                // graph saved before 0.3.3 means the values landed in the wrong widgets.
+                // The original array is still on `info`, so re-place it by name from the
+                // layout it was actually written in.
+                const saved = info && info.widgets_values;
+                const byName = remapWidgetValues(saved);
+                if (byName && detectLayout(saved) !== ORDER_0_3_3) {
+                    for (const [name, value] of Object.entries(byName)) {
+                        setWidget(this, name, value);
+                    }
+                    console.log(
+                        `[MiniMaxRefPack] event=migrated_layout slots=${saved.length} ` +
+                        `provider=${byName.prompt_provider}`
+                    );
+                } else if (migrateProviderWidget(widgetByName(this, "prompt_provider"))) {
+                    console.log(
+                        "[MiniMaxRefPack] event=migrated_provider from=use_openrouter " +
+                        `to=${widgetByName(this, "prompt_provider").value}`
+                    );
+                }
+                // After the migration above, so a 0.3.1 graph's `true` has already become
+                // "openrouter" and the button is hidden rather than flickering on.
+                watchProviderWidget(this);
+                syncLocalBtn(this);
                 const rw = widgetByName(this, "references_json");
                 stopPreview(this);
                 this._mmrpRefs = parseRefsValue(rw);

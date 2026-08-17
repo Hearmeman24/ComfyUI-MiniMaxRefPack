@@ -1285,21 +1285,25 @@
         }
       ],
       "properties": {
+        "cnr_id": "comfyui-minimaxrefpack",
+        "ver": "0.3.3",
         "Node name for S&R": "MiniMaxH3ReferencePack"
       },
       "widgets_values": [
         "I want that the girl from the image will be in this video",
         "",
+        "",
+        "openrouter",
+        "",
         "google/gemini-3-flash-preview",
+        "medium",
         "",
         "",
+        "auto",
         1280,
         720,
         8.0,
-        true,
-        "medium",
-        "auto",
-        ""
+        2048
       ]
     },
     {

@@ -52,6 +52,23 @@
     font-weight: 600;
 }
 
+/* The one deliberate exception to the rule above, at Aviv's request 2026-08-17. Green
+   because it means "running on your own machine, nothing billed" and because it is the
+   only button here that reconfigures three widgets at once. It is also the only button
+   that comes and goes (shown only while prompt_provider is `local`), so a colour change
+   doubles as the signal that the node is in a different mode. */
+.mmrp-local-btn {
+    background: #17402f;
+    border-color: #2e7d5b;
+    color: #7fdcaa;
+    font-weight: 600;
+}
+
+.mmrp-local-btn:hover:not(:disabled) {
+    background: #1d5340;
+    border-color: #3d9c72;
+}
+
 /* ---- upload row (also holds Save/Load config + the ⚙ settings button) ----
    Fixed 30px, no wrap: the node is fixed at 1340px wide, everything fits on one
    line, and the fixed-height arithmetic depends on this never growing.
@@ -293,6 +310,49 @@
     justify-content: flex-end;
     gap: 8px;
     flex-wrap: wrap;
+}
+
+/* ---- local server picker (openLocalServerModal) ----
+   Same modal family. The model rows are full-width buttons rather than a <select>
+   because picking one is a commit, not a preference: it rewrites three widgets at
+   once, so it should look like an action. */
+
+.mmrp-server-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.mmrp-server-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.mmrp-server-title {
+    color: #aaa;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    border-bottom: 1px solid #333;
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+}
+
+.mmrp-server-empty {
+    color: #777;
+    font-size: 11px;
+    font-style: italic;
+    padding: 2px 0 2px 8px;
+}
+
+.mmrp-server-model {
+    justify-content: flex-start;
+    text-align: left;
+    width: 100%;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
 }
 
 /* ---- crop/trim edit modal (openEditModal) ----

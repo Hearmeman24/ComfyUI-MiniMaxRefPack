@@ -21,7 +21,7 @@ import os
 from aiohttp import web
 
 from .refs import ReferenceError, validate_crop
-from . import logs, media, prompt
+from . import endpoint, logs, media, prompt
 
 try:
     from server import PromptServer
@@ -140,6 +140,38 @@ async def system_prompt_route(request: web.Request) -> web.Response:
     return web.json_response({"default": prompt._read_system_prompt()})
 
 
+async def detect_route(request):
+    """Which OpenAI-compatible servers this ComfyUI can reach on the usual local ports.
+
+    Runs the probe HERE rather than in the browser, deliberately. `localhost` has to mean
+    whatever the ComfyUI process can reach: a Dockerised or pod ComfyUI must be told the
+    truth about its own network instead of the user's laptop, and the browser could not
+    read the responses anyway without every local server opting into CORS.
+
+    SECURITY: `base` is loopback-only and is never resolved (endpoint.is_loopback). This
+    process will happily connect to whatever it is told to, and ComfyUI often runs with no
+    auth in front of it, so an unrestricted version of this route is a port scanner and an
+    SSRF probe for anyone holding the URL. Only a literal 127.0.0.1 / localhost / ::1 is
+    accepted; anything else is refused without a connection being attempted.
+    """
+    base = (request.query.get("base") or "").strip()
+    if base:
+        if not endpoint.is_loopback(base):
+            logs.log("detect_refused", reason="not_loopback")
+            return web.json_response(
+                {"error": "only loopback addresses can be probed from here; type a "
+                          "remote URL into api_base by hand instead"},
+                status=400,
+            )
+        models = prompt._models_at(base)
+        if models is None:
+            return web.json_response({"servers": []})
+        return web.json_response({"servers": [{"label": "custom", "base": base,
+                                               "models": models}]})
+
+    return web.json_response({"servers": prompt.detect_local_servers()})
+
+
 # ---- registration -------------------------------------------------------------
 
 _ROUTES: tuple[tuple[str, str, object], ...] = (
@@ -147,6 +179,7 @@ _ROUTES: tuple[tuple[str, str, object], ...] = (
     ("GET", "/minimax_refpack/thumb", thumb_route),
     ("GET", "/minimax_refpack/files", list_files_route),
     ("GET", "/minimax_refpack/system_prompt", system_prompt_route),
+    ("GET", "/minimax_refpack/detect", detect_route),
 )
 
 if PromptServer is not None and getattr(PromptServer, "instance", None) is not None:
