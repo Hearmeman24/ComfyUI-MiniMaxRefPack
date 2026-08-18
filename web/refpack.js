@@ -1458,9 +1458,7 @@ function applyRefs(node, refs) {
 }
 
 async function addFiles(node, kind, files) {
-    const refs = cloneRefs(node._mmrpRefs);
-    const arr = refs[`${kind}s`];
-    const room = CAPS[kind] - arr.length;
+    const room = CAPS[kind] - node._mmrpRefs[`${kind}s`].length;
     if (room <= 0) return;
     const all = Array.from(files);
     const take = all.slice(0, room);
@@ -1470,18 +1468,34 @@ async function addFiles(node, kind, files) {
     }
     mlog("upload", { kind, files: take.length });
     const uploadStarted = performance.now();
+    const uploaded = [];
     for (const file of take) {
         try {
             const name = await apiUpload(file);
             mlog("uploaded", { kind, file: name, bytes: file.size });
             // soundtrack ON by default; the probe turns it back off for a silent clip
-            arr.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
+            uploaded.push(kind === "video" ? { file: name, use_soundtrack: true } : { file: name });
         } catch (e) {
             mwarn("upload_failed", { kind, file: file.name, error: e.message });
             alert(`Upload failed for ${file.name}: ${e.message}`);
         }
     }
     mlog("upload_done", { kind, files: take.length, ms: performance.now() - uploadStarted });
+    // The clone is taken HERE, after the awaits — never at entry. Every `await` above is
+    // a window in which another gesture can finish its own applyRefs: a second drop, an
+    // upload-button pick, or a tile deletion. A clone taken at entry would be written
+    // back over all of it, silently discarding refs whose files are already on the
+    // server (and resurrecting ones the user just deleted). Drag-and-drop is what makes
+    // this easy to hit — two drops a second apart need no file dialog in between.
+    const refs = cloneRefs(node._mmrpRefs);
+    const arr = refs[`${kind}s`];
+    const stillFree = Math.max(0, CAPS[kind] - arr.length);
+    if (uploaded.length > stillFree) {
+        // Someone else took the slots while these were uploading. The files are on the
+        // server either way; they just do not get a reference.
+        mwarn("upload_raced", { kind, dropped: uploaded.length - stillFree });
+    }
+    arr.push(...uploaded.slice(0, stillFree));
     applyRefs(node, refs);
 }
 
@@ -1527,6 +1541,68 @@ const KIND_UPLOAD_META = [
     ["video", "Video", "video/*"],
     ["audio", "Audio", "audio/*"],
 ];
+
+// Drag-and-drop routing. Dropped files are sorted by what they ARE rather than by
+// where the pointer landed: hitTest only covers DRAWN regions, so a drop on empty
+// strip space has no section to report, and sorting by kind is also what makes a
+// mixed drop fill all three sections in one gesture.
+//
+// The block between the two MMRP-DROP markers is extracted and executed by
+// tests/test_drop.py under node. It is SELF-CONTAINED on purpose - it may not
+// reference KINDS or CAPS, because a closure over a module-level constant compiles
+// fine in the browser and dies under node with a ReferenceError.
+// >>> MMRP-DROP
+const DROP_KINDS = ["image", "video", "audio"];
+
+// Consulted ONLY when the MIME type says nothing useful - browsers leave `type` empty
+// for the less common containers (.mkv, .flac), and some hand back
+// application/octet-stream for the same files. Deliberately not a fallback for every
+// unrecognised type: `{name: "scan.png", type: "application/pdf"}` must be refused, not
+// uploaded as an image because its name ends in .png. Not exhaustive and does not need
+// to be - anything that misses lands in `rejected` under its own name, which is a
+// visible refusal, not a silent one.
+const DROP_UNKNOWN_TYPES = ["", "application/octet-stream"];
+const DROP_EXTENSIONS = {
+    image: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "avif", "heic", "heif"],
+    video: ["mp4", "webm", "mov", "mkv", "avi", "m4v", "mpg", "mpeg", "wmv", "ogv"],
+    audio: ["mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif"],
+};
+
+function dropKindOf(file) {
+    // Duck-typed on {type, name}: `instanceof File` would pass in the browser and
+    // reject the plain objects the tests feed it, which is the wrong way round.
+    // The three prefixes are the same ones KIND_UPLOAD_META hands the file pickers.
+    const type = String(file?.type ?? "").toLowerCase();
+    for (const kind of DROP_KINDS) {
+        if (type.startsWith(`${kind}/`)) return kind;
+    }
+    // A type the browser was confident about and that is not media is a refusal, not an
+    // invitation to guess from the name.
+    if (!DROP_UNKNOWN_TYPES.includes(type)) return null;
+    const name = String(file?.name ?? "");
+    const dot = name.lastIndexOf(".");
+    if (dot < 0) return null;
+    const ext = name.slice(dot + 1).toLowerCase();
+    for (const kind of DROP_KINDS) {
+        if (DROP_EXTENSIONS[kind].includes(ext)) return kind;
+    }
+    return null;
+}
+
+function bucketDroppedFiles(files) {
+    // -> {buckets: {image: [], video: [], audio: []}, rejected: [name, ...]}.
+    // Pure: it decides nothing about caps or uploads, which stay addFiles' job.
+    const buckets = {};
+    for (const kind of DROP_KINDS) buckets[kind] = [];
+    const rejected = [];
+    for (const file of Array.from(files ?? [])) {
+        const kind = dropKindOf(file);
+        if (kind) buckets[kind].push(file);
+        else rejected.push(String(file?.name ?? "").trim() || "(unnamed)");
+    }
+    return { buckets, rejected };
+}
+// <<< MMRP-DROP
 
 function buildCustomBlock(node) {
     const container = document.createElement("div");
@@ -1637,6 +1713,95 @@ function buildCustomBlock(node) {
     directionInput.placeholder = "Prompt — describe the shot…";
     directionInput.spellcheck = false;
     container.appendChild(directionInput);
+
+    // --- drag-and-drop ---------------------------------------------------------
+    //
+    // Attached to `container` rather than to the canvas: it is the real DOM element
+    // layered over the litegraph canvas by addDOMWidget, so native drag events fire
+    // on it, and drops over the button row, the canvas and the prompt box all bubble
+    // here. These listeners die with the element, so onRemoved has nothing to undo.
+    //
+    // The hijack guard is on `drop`, not on `dragover`. ComfyUI ingests dropped files
+    // from a DOCUMENT-level drop listener that bails when event.defaultPrevented, so a
+    // swallow on a sibling overlay's dragover never reaches it. Measured on frontend
+    // 1.48.6: with neither guard below, dropping an image here also spawns a LoadImage
+    // node; either one alone suppresses that. Both are kept - they fail differently
+    // (defaultPrevented vs never reaching document), so a frontend that drops one bail
+    // is still covered.
+    const dragHasFiles = (e) => {
+        // Every handler is gated on this. The prompt textarea is a CHILD of this
+        // container, and calling preventDefault on a text drag would take away its
+        // perfectly good default: dropping selected text into the box.
+        const types = e.dataTransfer && e.dataTransfer.types;
+        return !!types && Array.prototype.indexOf.call(types, "Files") !== -1;
+    };
+    // A counter, not a boolean: dragenter/dragleave fire again for every child element
+    // the pointer crosses, so a boolean flickers the highlight off mid-drag.
+    let dragDepth = 0;
+    const clearDragState = () => {
+        dragDepth = 0;
+        container.classList.remove("mmrp-dragover");
+    };
+    container.addEventListener("dragenter", (e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        dragDepth += 1;
+        container.classList.add("mmrp-dragover");
+    });
+    container.addEventListener("dragover", (e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();                    // without this the drop never fires at all
+        e.dataTransfer.dropEffect = "copy";
+    });
+    container.addEventListener("dragleave", (e) => {
+        if (!dragHasFiles(e)) return;
+        dragDepth -= 1;
+        // relatedTarget is what the pointer moved INTO - null when it left the window.
+        // Checking it as well as the counter makes the count self-correcting: a drag
+        // cancelled earlier can leave the depth stuck above zero, and without this the
+        // highlight would survive the next drag that merely flies across the node.
+        if (dragDepth <= 0 || !container.contains(e.relatedTarget)) clearDragState();
+    });
+    // Esc mid-drag, or letting go outside the browser window, cancels the drag with NO
+    // dragleave anywhere in the page (measured in Chromium 2026-08-18), so the highlight
+    // would sit on the node until the next drag. A live HTML5 drag suppresses mousemove,
+    // so a mousemove over the block can only mean the drag is already over.
+    container.addEventListener("mousemove", () => {
+        if (dragDepth !== 0) clearDragState();
+    });
+    container.addEventListener("drop", async (e) => {
+        if (!dragHasFiles(e)) return;
+        clearDragState();
+        const { buckets, rejected } = bucketDroppedFiles(e.dataTransfer.files);
+        // Look BEFORE claiming. Suppressing the event is how ComfyUI is told to keep its
+        // hands off, which is what turns a dropped image into a reference instead of a
+        // LoadImage node - but claiming a drop this node cannot use costs the user
+        // ComfyUI's own handling of it, and dropping a workflow .json onto a node this
+        // large is an easy thing to do. Nothing usable in the drop means it was never
+        // ours: let it through and the workflow loads exactly as it does off-node.
+        const accepted = DROP_KINDS.reduce((n, kind) => n + buckets[kind].length, 0);
+        if (accepted === 0) {
+            mlog("drop_passed_through", { rejected: rejected.length });
+            return;
+        }
+        e.preventDefault();     // the documented bail in ComfyUI's document-level ingest
+        e.stopPropagation();    // and it never reaches document either way
+        if (rejected.length) {
+            alert(`Not an image, video or audio file — skipped ${rejected.join(", ")}.`);
+        }
+        mlog("drop", {
+            image: buckets.image.length, video: buckets.video.length,
+            audio: buckets.audio.length, rejected: rejected.length,
+        });
+        // Awaited one kind at a time. addFiles clones the refs, uploads serially and
+        // finishes with applyRefs; two of them running concurrently would each apply a
+        // clone taken before the other started, and one side's uploads would vanish.
+        // DROP_KINDS, not the module-level KINDS: `buckets` is keyed by the former, and
+        // a future entry in the latter would index undefined and throw in here.
+        for (const kind of DROP_KINDS) {
+            if (buckets[kind].length) await addFiles(node, kind, buckets[kind]);
+        }
+    });
 
     node._mmrpBody = {
         root: container,
@@ -2772,7 +2937,11 @@ app.registerExtension({
             node._mmrpHideIntervals = [ivRefs, ivDirection, ivSystemPrompt].filter((id) => id !== undefined);
 
             const bodyEl = buildCustomBlock(node);
-            const domWidget = node.addDOMWidget("mmrp_block", "custom", bodyEl, { serialize: false });
+            // hideOnZoom defaults to TRUE in addDOMWidget. Below the frontend's LOD scale
+            // threshold the overlay stops taking pointer events, and a drop on the
+            // zoomed-out node then lands on the litegraph canvas and gets hijacked into
+            // a LoadImage node. Keeping the overlay live is what stops that.
+            const domWidget = node.addDOMWidget("mmrp_block", "custom", bodyEl, { serialize: false, hideOnZoom: false });
             node._mmrpDomWidget = domWidget;
             // Constant, by construction: the CSS pins the DOM heights this arithmetic
             // assumes (uploadsH/promptH/gap), the canvas height is CANVAS_ROWS.height.

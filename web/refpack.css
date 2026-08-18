@@ -200,6 +200,18 @@
     border-radius: 6px;
 }
 
+/* Drag-and-drop target feedback, while files are over the block.
+   OUTLINE, never border: refpack.js paints the slab's own edge rather than using a
+   CSS border precisely to keep a border-vs-content-box mismatch out of canvas
+   hit-testing, and the block's heights are pinned against the fixed-size arithmetic
+   in refpack.js. An outline reserves no layout space at any offset (this one is pulled
+   inside the rounded edge with a negative one), so the highlight cannot shift the
+   node's geometry by a pixel. */
+.mmrp-dragover .mmrp-canvas {
+    outline: 2px dashed #bbb;
+    outline-offset: -3px;
+}
+
 /* The single shared click-to-play video overlay, positioned over a tile by
    togglePreview(). Child of .mmrp-block, so ComfyUI's zoom transform applies to
    it exactly as it does to the canvas underneath. */
