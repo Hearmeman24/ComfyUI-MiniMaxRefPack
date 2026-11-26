@@ -43,16 +43,20 @@ def _package_version() -> str:
 WORKFLOWS = sorted(WORKFLOW_DIR.glob("*.json"))
 
 
-def _widget_spec():
+# Every node type this pack registers; each is checked against its own declaration.
+PACK_CLASSES = dict(nodes.NODE_CLASS_MAPPINGS)
+
+
+def _widget_spec(node_type="MiniMaxH3ReferencePack"):
     """(name, type_spec) per widget, in the order litegraph restores them."""
-    spec = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()
+    spec = PACK_CLASSES[node_type].INPUT_TYPES()
     ordered = list(spec.get("required", {}).items()) + list(spec.get("optional", {}).items())
     return [(name, entry[0]) for name, entry in ordered]
 
 
 def _pack_nodes(path):
     graph = json.loads(path.read_text())
-    return [n for n in graph.get("nodes", []) if n.get("type") == "MiniMaxH3ReferencePack"]
+    return [n for n in graph.get("nodes", []) if n.get("type") in PACK_CLASSES]
 
 
 def test_there_is_at_least_one_example_workflow():
@@ -78,9 +82,8 @@ def test_saved_widget_values_match_the_declared_types(path):
         "STRING": lambda v: isinstance(v, str),
         "BOOLEAN": lambda v: isinstance(v, bool),
     }
-    widgets = _widget_spec()
-
     for node in _pack_nodes(path):
+        widgets = _widget_spec(node["type"])
         values = node.get("widgets_values") or []
         assert len(values) <= len(widgets), (
             f"{path.name}: {len(values)} saved values for {len(widgets)} widgets - "
@@ -176,3 +179,68 @@ def test_preview_nodes_ship_empty(path):
                 "run. Clear it before shipping: whatever you last generated goes public "
                 "with the workflow."
             )
+
+
+# ---- the image-edit example ------------------------------------------------------
+
+IMAGE_EDIT_WORKFLOW = WORKFLOW_DIR / "MiniMax H3 Image - Edit - Reference Manager.json"
+
+
+def test_the_image_edit_example_ships():
+    assert IMAGE_EDIT_WORKFLOW.exists()
+
+
+def test_the_image_edit_example_wires_the_pack_into_the_conditioning_node():
+    """image_1 (the picture to edit) must reach images.image_1, and the written prompt
+    must reach the conditioning node's prompt - otherwise the example edits nothing."""
+    graph = json.loads(IMAGE_EDIT_WORKFLOW.read_text())
+    by_id = {n["id"]: n for n in graph["nodes"]}
+    packs = [n for n in graph["nodes"] if n["type"] == "MiniMaxH3ImageReferencePack"]
+    conds = [n for n in graph["nodes"] if n["type"] == "MiniMaxH3ImageConditioning"]
+    assert len(packs) == 1 and len(conds) == 1
+    pack, cond = packs[0], conds[0]
+    names = [o["name"] for o in pack["outputs"]]
+    assert names == [f"image_{i}" for i in range(1, 10)] + ["prompt", "debug"]
+
+    # Follow each pack output downstream, through resize nodes only (the example
+    # brings the picture to edit up to ~4 MP like the stock edit workflow does).
+    passthrough = {"ResizeImageMaskNode"}
+    wired = {}
+
+    def follow(node_id, slot, name):
+        for _lid, src, src_slot, dst, dst_slot, _t in graph["links"]:
+            if src != node_id or src_slot != slot:
+                continue
+            if dst == cond["id"]:
+                wired.setdefault(name, set()).add(cond["inputs"][dst_slot]["name"])
+            elif by_id[dst]["type"] in passthrough:
+                follow(dst, 0, name)
+
+    for slot, name in enumerate(names):
+        follow(pack["id"], slot, name)
+    # The conditioning node's Autogrow names its slots image_0, image_1, ... and sorts
+    # them by that number before tagging (nodes_minimax_h3.py:727), so what must hold is
+    # ORDER: pack image_k lands on the k-th slot, and image_1 - the picture to edit -
+    # on the lowest one.
+    slots = []
+    for i in range(1, 10):
+        targets = wired.get(f"image_{i}")
+        assert targets and len(targets) == 1, (f"image_{i}", wired)
+        (name,) = targets
+        assert name.startswith("images.image_"), name
+        slots.append(int(name.rsplit("_", 1)[1]))
+    assert slots == sorted(slots) and len(set(slots)) == 9, slots
+    assert wired.get("prompt") == {"prompt"}
+
+    # Every link is mirrored on both ends, or the frontend drops it on load.
+    for link_id, src, src_slot, dst, dst_slot, _type in graph["links"]:
+        assert link_id in (by_id[src]["outputs"][src_slot].get("links") or []), link_id
+        assert by_id[dst]["inputs"][dst_slot].get("link") == link_id, link_id
+
+
+def test_the_image_edit_example_names_the_shipped_models():
+    graph = json.loads(IMAGE_EDIT_WORKFLOW.read_text())
+    values = {n["type"]: n.get("widgets_values") for n in graph["nodes"]}
+    assert values["UNETLoader"][0] == "minimax_h3_image_pruned_int8_convrot.safetensors"
+    assert values["CLIPLoader"][:2] == ["qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "minimax"]
+    assert values["VAELoader"][0] == "ostris_h3_image_vae_fp16.safetensors"

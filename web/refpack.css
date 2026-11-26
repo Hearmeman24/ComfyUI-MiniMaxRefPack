@@ -52,7 +52,7 @@
     font-weight: 600;
 }
 
-/* The one deliberate exception to the rule above, at Aviv's request 2026-08-17. Green
+/* The one deliberate exception to the rule above, at the maintainer's request 2026-08-17. Green
    because it means "running on your own machine, nothing billed" and because it is the
    only button here that reconfigures three widgets at once. It is also the only button
    that comes and goes (shown only while prompt_provider is `local`), so a colour change

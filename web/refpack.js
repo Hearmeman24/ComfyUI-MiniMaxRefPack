@@ -1,4 +1,12 @@
 /**
+ * TWO NODES, ONE FILE (0.4.0): MiniMax References Manager (MiniMaxH3ReferencePack, video)
+ * and MiniMax Image References Manager (MiniMaxH3ImageReferencePack, still-image edits)
+ * share every line below. What differs is the MODES table (see MMRP-MODES): the image
+ * node has one row (Images), no video/audio upload, marks tile 1 as the edit target,
+ * can reorder, accepts dropped images, and saves configs stamped with its node type.
+ * Everything this header says about layout holds for both; the image node's slab is
+ * simply one row tall.
+ *
  * MiniMax References Manager — native widgets (openrouter_api_key, model) stay on top,
  * untouched; everything custom lives in one DOM block BELOW them. Per the visual
  * spec the DOM/canvas split is VISIBLE: no wrapping panel, buttons and prompt sit
@@ -87,8 +95,6 @@
  */
 
 import { app } from "../../scripts/app.js";
-
-const NODE_NAME = "MiniMaxH3ReferencePack";
 
 // ---------------------------------------------------------------------------
 // 0.3.1 -> 0.3.2 widget migration.
@@ -196,9 +202,119 @@ function remapWidgetValues(values) {
     return out;
 }
 // <<< MMRP-MIGRATE
+// >>> MMRP-MODES
+// Extracted and executed under node by tests/test_image_node.py, like MMRP-MIGRATE:
+// keep it free of imports and DOM access.
+const NODE_NAME = "MiniMaxH3ReferencePack";
+const IMAGE_NODE_NAME = "MiniMaxH3ImageReferencePack";
 const KINDS = ["image", "video", "audio"];
 const CAPS = { image: 9, video: 3, audio: 3 };
 const SECTION_LABEL = { image: "Images", video: "Videos", audio: "Audio" };
+
+// ---------------------------------------------------------------------------
+// One file, two nodes. Everything below is shared; the differences between the
+// References Manager (video) and the Image References Manager (still-image edits) are
+// THIS table and nothing else, read through node._mmrpMode. The video entry restates
+// exactly what this file did before the image node existed, so that node's behaviour
+// is unchanged - a branch on a mode flag is only ever added where the video value
+// reproduces the old code path.
+//
+//   kinds          which rows/upload buttons exist, in order
+//   editTarget     tile 1 of the image row is the picture being edited, and says so
+//   reorder        tiles can be moved (make-edit-target chip, arrow keys)
+//   dropFiles      files dropped on the node are uploaded (images only, others refused)
+//   migrateLayout  run the 0.3.1/0.3.2 widget-order repair on load (video node only:
+//                  the image node never had an older layout)
+//   configNode     stamped into a saved config as `node`; null = the legacy shape,
+//                  which carries no field (see configOwner)
+//   modelWidget    the widget a config's `model` field is read from / restored into
+// ---------------------------------------------------------------------------
+const MODES = {
+    [NODE_NAME]: {
+        name: NODE_NAME,
+        label: "MiniMax References Manager",
+        kinds: KINDS,
+        editTarget: false,
+        reorder: false,
+        dropFiles: false,
+        migrateLayout: true,
+        configNode: null,
+        configPrefix: "minimax-refpack",
+        // Sic: the widget was renamed openrouter_model in 0.3.3, so this node's
+        // configs save and restore "" here. Left as it is - fixing it would change
+        // what an existing config does on load - and recorded for a later release.
+        modelWidget: "model",
+        systemPromptQuery: "",
+        placeholder: "Prompt — describe the shot…",
+        localHint:
+            "Pick the model that should write your prompts. Videos will be sent as " +
+            "still frames and audio will not be sent at all.",
+    },
+    [IMAGE_NODE_NAME]: {
+        name: IMAGE_NODE_NAME,
+        label: "MiniMax Image References Manager",
+        kinds: ["image"],
+        editTarget: true,
+        reorder: true,
+        dropFiles: true,
+        migrateLayout: false,
+        configNode: IMAGE_NODE_NAME,
+        configPrefix: "minimax-image-refpack",
+        modelWidget: "openrouter_model",
+        systemPromptQuery: "?mode=image_edit",
+        placeholder: "Edit — describe the change to <Picture 1>…",
+        localHint: "Pick the vision model that should write your edit prompts.",
+    },
+};
+
+function modeOf(node) {
+    return (node && node._mmrpMode) || MODES[NODE_NAME];
+}
+
+function imagesOnly(mode) {
+    return mode.kinds.length === 1 && mode.kinds[0] === "image";
+}
+
+// The image node takes stills only. Mirrors what MiniMaxH3ImageReferencePack checks on
+// the server (nodes._is_image_file), so a file the picker's "All files" option let
+// through is refused here with a sentence rather than at queue time.
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic)$/i;
+export function isImageFile(file) {
+    if (!file) return false;
+    // SVG is an image to a browser and not to PIL, which is what decodes it server-side.
+    if (typeof file.type === "string" && file.type) {
+        return file.type.startsWith("image/") && file.type !== "image/svg+xml";
+    }
+    return IMAGE_EXT.test(String(file.name || ""));
+}
+
+// Which node wrote a config. Configs predating the image node carry no `node` field,
+// and only the References Manager existed then, so absent means that node.
+//
+// Decision (0.4.0): a config loads only into the node type that saved it. The other
+// way round is REFUSED with a message rather than half-loaded: a video config's
+// direction is a scene brief, not an edit, and its first image is not the picture
+// to edit - loading "just the images" would hand the user a plausible-looking setup
+// with the wrong <Picture 1> and the wrong prompt. Loading the images by hand is one
+// upload away; undoing a silently wrong edit target is not.
+export function configOwner(data) {
+    return data && typeof data.node === "string" && data.node ? data.node : NODE_NAME;
+}
+
+export function configMismatch(data, modeName) {
+    const owner = configOwner(data);
+    const mode = MODES[modeName] || MODES[NODE_NAME];
+    if (owner !== mode.name) {
+        const ownerLabel = MODES[owner] ? MODES[owner].label : owner;
+        return `it was saved by ${ownerLabel}, not ${mode.label}. Load it into a ${ownerLabel} node instead.`;
+    }
+    const foreign = (data.references || []).filter((r) => r && !mode.kinds.includes(r.kind));
+    if (foreign.length) {
+        return `it holds ${foreign.length} reference(s) this node cannot take (${mode.label} takes ${mode.kinds.join(", ")} only).`;
+    }
+    return null;
+}
+// <<< MMRP-MODES
 
 // LTX Director's flat neutral palette (WhatDreamsCost js/ltx_director.js), counted
 // out of that file, not invented here. The canvas reads these directly; refpack.css
@@ -252,17 +368,18 @@ const CL = {
 CL.stripH = CL.stripPad * 2 + CL.tile;
 
 // The rows never move: every section is always drawn at full tile height, 0 items or
-// 9. Static layout, computed once — this is the whole point of the fixed-size node.
-const CANVAS_ROWS = (() => {
+// 9. Static layout, computed once per node type — this is the whole point of the
+// fixed-size node. The image node has one row, the video node three.
+function canvasRowsFor(kinds) {
     const rows = [];
     let y = CL.padTop;
-    for (const kind of KINDS) {
+    for (const kind of kinds) {
         rows.push({ kind, y, stripY: y + CL.headerH + CL.headGap });
         y += CL.headerH + CL.headGap + CL.stripH + CL.rowGap;
     }
     // The trailing rowGap doubles as the slab's bottom padding.
     return { rows, height: y };
-})();
+}
 
 // Fixed block geometry. The DOM heights (uploadsH, promptH, gap) are pinned in
 // refpack.css to the same values — the two must agree, there is no measurement.
@@ -279,16 +396,28 @@ const CONTENT = {
     promptH: 110, // .mmrp-direction fixed height — clearly smaller than a canvas row
     gap: 8, // .mmrp-block flex gap
 };
-CONTENT.height =
-    CONTENT.uploadsH + CONTENT.gap + CANVAS_ROWS.height + CONTENT.gap + CONTENT.promptH;
 
-// The ONE node size. Height floors against the 19 output sockets; widgetY is where
+// Per node type, cached on the mode entry: the canvas rows and the DOM block height
+// that follows from them. Same arithmetic as ever; only the row count varies.
+function layoutOf(node) {
+    const mode = modeOf(node);
+    if (!mode._layout) {
+        const canvas = canvasRowsFor(mode.kinds);
+        mode._layout = {
+            canvas,
+            height: CONTENT.uploadsH + CONTENT.gap + canvas.height + CONTENT.gap + CONTENT.promptH,
+        };
+    }
+    return mode._layout;
+}
+
+// The ONE node size. Height floors against the output sockets; widgetY is where
 // litegraph placed the DOM block below the native widgets (fallback for the beat
 // before the first layout assigns last_y).
 function fixedSize(node) {
     const widgetY = (node._mmrpDomWidget && node._mmrpDomWidget.last_y) || 80;
     const outputsMin = ((node.outputs && node.outputs.length) || 1) * 20 + 40;
-    return [CONTENT.width, Math.max(widgetY + CONTENT.height + CONTENT.pad, outputsMin)];
+    return [CONTENT.width, Math.max(widgetY + layoutOf(node).height + CONTENT.pad, outputsMin)];
 }
 
 // ---------------------------------------------------------------------------
@@ -538,8 +667,8 @@ function fileUrl(file) {
 // on the user's own machine (download + file picker, see "Config save/load" below),
 // so the /minimax_refpack/packs routes are no longer called from the UI at all.
 
-async function apiSystemPromptDefault() {
-    const res = await fetch("/minimax_refpack/system_prompt");
+async function apiSystemPromptDefault(mode) {
+    const res = await fetch(`/minimax_refpack/system_prompt${(mode && mode.systemPromptQuery) || ""}`);
     if (!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const data = await res.json();
     return data.default || "";
@@ -927,11 +1056,36 @@ function drawEditChip(ctx, x, y, edited) {
     ctx.stroke();
 }
 
+// Image node only: "make this the image to edit" — bottom-left above the badge, the
+// slot the ♪ toggle owns on a video tile (images never have one). Same opaque chip
+// family as ♪, with a drawn bullseye: the picture this moves into is the target.
+function drawTargetChip(ctx, x, y) {
+    const S = CL.sound;
+    ctx.fillStyle = "#111";
+    pathRoundRect(ctx, x, y, S, S, 4);
+    ctx.fill();
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    pathRoundRect(ctx, x + 0.5, y + 0.5, S - 1, S - 1, 4);
+    ctx.stroke();
+    const cx = x + S / 2;
+    const cy = y + S / 2;
+    ctx.strokeStyle = C.textMuted;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = C.textMuted;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+    ctx.fill();
+}
+
 // One tile: well, thumbnail/glyph, tag badge, delete, edit chip, soundtrack state,
 // play glyph, missing treatment, selection stroke. `lines` is the pre-computed badge
 // text (up to three: tag, a video's <Audio N>, the crop/trim summary); `playState` is
 // null | "play" | "pause" (null = no preview affordance: images, missing refs).
-function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, playState) {
+function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, playState, targetChip) {
     const T = CL.tile;
 
     ctx.save();
@@ -1009,6 +1163,8 @@ function drawTile(ctx, kind, ref, lines, x, y, selected, soundState, badgeH, pla
     // Crop/trim entry point — top-left, the one corner nothing else owns. A missing
     // file has no media to show in the editor, so it gets no chip.
     if (!ref.missing) drawEditChip(ctx, x, y, hasEdit(ref));
+
+    if (targetChip) drawTargetChip(ctx, x + 3, y + T - badgeH - CL.sound - 3);
 
     if (soundState) {
         const S = CL.sound;
@@ -1138,8 +1294,9 @@ function draw(node) {
     const regions = [];
     node._mmrpHit = { regions };
     const playing = node._mmrpPlaying;
+    const mode = modeOf(node);
 
-    for (const row of CANVAS_ROWS.rows) {
+    for (const row of layoutOf(node).canvas.rows) {
         const kind = row.kind;
         const arr = refs[`${kind}s`];
         const taggedArr = tagged[`${kind}s`];
@@ -1173,6 +1330,11 @@ function draw(node) {
             const lines = kind === "video" && t.audioTag
                 ? [t.tag, `vid_audio ${t.audioTag}`]
                 : [t.tag];
+            // Image node: the tag is positional, so the marker is too — whichever image
+            // sits first is <Picture 1>, the one MiniMaxH3ImageConditioning edits.
+            const isTarget = mode.editTarget && kind === "image" && i === 0;
+            if (isTarget) lines.push("edit target");
+            const targetChip = mode.reorder && kind === "image" && i > 0;
             // An edited reference states its edit on the badge: "2.00-6.50s · cropped".
             const summary = editSummary(ref);
             if (summary) lines.push(summary);
@@ -1201,7 +1363,7 @@ function draw(node) {
                     playing && playing.kind === kind && playing.file === ref.file ? "pause" : "play";
             }
 
-            drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH, playState);
+            drawTile(ctx, kind, ref, lines, tx, tileY, selected, soundState, badgeH, playState, targetChip);
 
             // Hit regions, most specific last — hitTest scans in reverse so the
             // play/delete/soundtrack/edit affordances win over the tile containing them.
@@ -1216,6 +1378,18 @@ function draw(node) {
                     y: tileY + 3,
                     w: CL.del,
                     h: CL.del,
+                });
+            }
+            if (targetChip) {
+                regions.push({
+                    type: "target",
+                    kind,
+                    index: i,
+                    file: ref.file,
+                    x: tx + 3,
+                    y: tileY + CL.tile - badgeH - CL.sound - 3,
+                    w: CL.sound,
+                    h: CL.sound,
                 });
             }
             if (soundState === "on" || soundState === "off") {
@@ -1318,6 +1492,8 @@ function onCanvasMouseDown(node, e) {
         togglePreview(node, hit);
     } else if (hit.type === "edit") {
         openEditModal(node, hit.kind, hit.index);
+    } else if (hit.type === "target") {
+        moveRef(node, hit.kind, hit.index, 0);
     } else if (hit.type === "add") {
         node._mmrpBody.fileInputs[hit.kind].click();
     } else {
@@ -1419,13 +1595,13 @@ function widgetByName(node, name) {
 //
 // A reference set we cannot read is recoverable — the user re-adds the files. A workflow
 // that will not open is not. So: parse defensively, fall back to empty, warn once.
-function parseRefsValue(widget) {
+function parseRefsValue(widget, mode) {
     if (!widget) return emptyRefs();
     const raw = widget.value;
     if (typeof raw !== "string" || !raw.trim()) return emptyRefs();
     try {
         const parsed = JSON.parse(raw);
-        return fromReferencesList((parsed && parsed.references) || []);
+        return restrictToMode(fromReferencesList((parsed && parsed.references) || []), mode);
     } catch (e) {
         console.warn(
             "[MiniMaxRefPack] references_json held a value this build cannot read " +
@@ -1435,6 +1611,23 @@ function parseRefsValue(widget) {
         );
         return emptyRefs();
     }
+}
+
+// A node only ever holds the kinds it has rows for. For the video node that is all three
+// and this is the identity. For the image node a stray clip (a hand-edited graph, a
+// pasted value) would be invisible on the canvas yet still serialised and then refused
+// by the server, so it is dropped here, loudly.
+function restrictToMode(refs, mode) {
+    if (!mode || mode.kinds.length === KINDS.length) return refs;
+    const dropped = KINDS.filter((k) => !mode.kinds.includes(k)).reduce(
+        (n, k) => n + refs[`${k}s`].length,
+        0
+    );
+    if (!dropped) return refs;
+    mwarn("references_dropped", { node: mode.name, count: dropped, reason: "kind_not_supported" });
+    const out = emptyRefs();
+    for (const k of mode.kinds) out[`${k}s`] = refs[`${k}s`];
+    return out;
 }
 
 function syncReferencesWidget(node) {
@@ -1462,7 +1655,21 @@ async function addFiles(node, kind, files) {
     const arr = refs[`${kind}s`];
     const room = CAPS[kind] - arr.length;
     if (room <= 0) return;
-    const all = Array.from(files);
+    let all = Array.from(files);
+    if (imagesOnly(modeOf(node))) {
+        // The image node: `accept` is only a hint the picker's "All files" option
+        // ignores, so the kind is enforced here as well as on the server.
+        const refused = all.filter((f) => !isImageFile(f));
+        if (refused.length) {
+            mwarn("upload_refused", { kind, files: refused.length });
+            alert(
+                `${modeOf(node).label} takes images only — skipped ` +
+                    refused.map((f) => f.name).join(", ")
+            );
+        }
+        all = all.filter(isImageFile);
+        if (!all.length) return;
+    }
     const take = all.slice(0, room);
     // Caps are hard, but never SILENTLY hard — say what didn't fit.
     if (take.length < all.length) {
@@ -1485,6 +1692,23 @@ async function addFiles(node, kind, files) {
     applyRefs(node, refs);
 }
 
+// Image node only. Tags are positional (assignTags), so a move IS a retag: whatever
+// lands first becomes <Picture 1>, the image to edit, and every tile's badge is
+// redrawn from the new order. The selection follows the tile that moved.
+function moveRef(node, kind, from, to) {
+    const arr = node._mmrpRefs[`${kind}s`];
+    if (from === to || from < 0 || to < 0 || from >= arr.length || to >= arr.length) return;
+    const refs = cloneRefs(node._mmrpRefs);
+    const list = refs[`${kind}s`];
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
+    mlog("reference_moved", { kind, file: moved && moved.file, from: from + 1, to: to + 1 });
+    if (node._mmrpSelected && node._mmrpSelected.kind === kind && node._mmrpSelected.index === from) {
+        node._mmrpSelected.index = to;
+    }
+    applyRefs(node, refs);
+}
+
 function removeRef(node, kind, index) {
     const refs = cloneRefs(node._mmrpRefs);
     const [gone] = refs[`${kind}s`].splice(index, 1);
@@ -1502,7 +1726,7 @@ function renderNodeBody(node) {
     const body = node._mmrpBody;
     if (!body) return;
     const refs = node._mmrpRefs;
-    for (const kind of KINDS) {
+    for (const kind of modeOf(node).kinds) {
         body.uploadButtons[kind].disabled = refs[`${kind}s`].length >= CAPS[kind];
     }
     syncProbes(node);
@@ -1536,7 +1760,9 @@ function buildCustomBlock(node) {
     uploadRow.className = "mmrp-uploads";
     const uploadButtons = {};
     const fileInputs = {};
+    const mode = modeOf(node);
     for (const [kind, label, accept] of KIND_UPLOAD_META) {
+        if (!mode.kinds.includes(kind)) continue;
         const btn = document.createElement("button");
         btn.className = "mmrp-btn mmrp-upload-btn";
         btn.innerHTML = `${UPLOAD_ICON}<span>${label}</span>`;
@@ -1591,9 +1817,19 @@ function buildCustomBlock(node) {
 
     const canvas = document.createElement("canvas");
     canvas.className = "mmrp-canvas";
-    canvas.style.height = `${CANVAS_ROWS.height}px`; // fixed, set once
+    canvas.style.height = `${layoutOf(node).canvas.height}px`; // fixed, set once
     canvas.addEventListener("mousedown", (e) => onCanvasMouseDown(node, e));
     canvas.addEventListener("dblclick", (e) => onCanvasDblClick(node, e));
+    if (mode.reorder) {
+        // The canvas has no per-element tooltips; this names the one chip whose glyph
+        // alone does not say what it does.
+        canvas.addEventListener("mousemove", (e) => {
+            const pos = getMousePos(canvas, e);
+            const hit = hitTest(node, pos.x, pos.y);
+            const tip = hit && hit.type === "target" ? "Make this <Picture 1>, the image to edit" : "";
+            if (canvas.title !== tip) canvas.title = tip;
+        });
+    }
     // Keep litegraph's node context menu off the tiles (matches the reference's
     // per-item contextmenu swallow).
     canvas.addEventListener("contextmenu", (e) => e.stopPropagation());
@@ -1634,7 +1870,7 @@ function buildCustomBlock(node) {
     // plus a low-contrast border is exactly what once made this box invisible).
     const directionInput = document.createElement("textarea");
     directionInput.className = "mmrp-direction";
-    directionInput.placeholder = "Prompt — describe the shot…";
+    directionInput.placeholder = mode.placeholder;
     directionInput.spellcheck = false;
     container.appendChild(directionInput);
 
@@ -1662,25 +1898,31 @@ function buildCustomBlock(node) {
 // Nothing here touches /minimax_refpack/packs — the only server call is the input-dir
 // listing used to work out which referenced files are actually present on THIS pod.
 
-function configFilename(name) {
+function configFilename(name, mode) {
     const safe = (name || "config").replace(/[^A-Za-z0-9 ._-]+/g, "_").trim() || "config";
-    return `minimax-refpack-${safe}.json`;
+    return `${(mode || MODES[NODE_NAME]).configPrefix}-${safe}.json`;
 }
 
 function buildConfig(node, name) {
+    const mode = modeOf(node);
     const w = (n) => {
         const widget = widgetByName(node, n);
         return widget ? widget.value || "" : "";
     };
-    return {
+    const config = {
         version: 1,
         name,
         direction: w("direction"),
-        model: w("model"),
+        model: w(mode.modelWidget),
         reasoning_effort: w("reasoning_effort"),
         references: toReferencesList(node._mmrpRefs),
     };
+    // The video node's configs keep their exact pre-0.4.0 shape (no `node` field);
+    // configOwner() reads an absent field as that node.
+    if (mode.configNode) return { version: 1, node: mode.configNode, ...config };
+    return config;
 }
+
 
 function downloadJson(filename, obj) {
     const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
@@ -1726,7 +1968,7 @@ function saveConfig(node, anchorBtn) {
             return;
         }
         try {
-            const filename = configFilename(name);
+            const filename = configFilename(name, modeOf(node));
             downloadJson(filename, buildConfig(node, name));
             status.textContent = `Downloaded ${filename}`;
             input.disabled = true;
@@ -1823,7 +2065,7 @@ async function applyConfig(node, data, sourceLabel) {
         return null;
     };
     const unavailable = [
-        restore("model", data.model),
+        restore(modeOf(node).modelWidget, data.model),
         restore("reasoning_effort", data.reasoning_effort),
     ].filter(Boolean);
 
@@ -1846,6 +2088,8 @@ function openLoadConfigPanel(node, anchorBtn) {
         if (!file) return;
         try {
             const data = parseConfigFile(await file.text());
+            const mismatch = configMismatch(data, modeOf(node).name);
+            if (mismatch) throw new Error(mismatch);
             await applyConfig(node, data, file.name);
         } catch (e) {
             alert(`Couldn't load ${file.name}: ${e.message}`);
@@ -2494,9 +2738,7 @@ function openLocalServerModal(node, anchorBtn) {
                 "somewhere else, type its URL into api_base by hand.";
             return;
         }
-        hint.textContent =
-            "Pick the model that should write your prompts. Videos will be sent as " +
-            "still frames and audio will not be sent at all.";
+        hint.textContent = modeOf(node).localHint;
         for (const s of servers) {
             const group = document.createElement("div");
             group.className = "mmrp-server-group";
@@ -2589,7 +2831,7 @@ function openSystemPromptModal(node) {
     let prefilledDefault = "";
     if (!textarea.value.trim()) {
         hint.textContent = "Showing the built-in default. Edit to override it for this workflow.";
-        apiSystemPromptDefault()
+        apiSystemPromptDefault(modeOf(node))
             .then((text) => {
                 // Don't clobber anything the user typed while the fetch was in flight.
                 if (!textarea.value.trim()) {
@@ -2610,7 +2852,7 @@ function openSystemPromptModal(node) {
     loadDefaultBtn.textContent = "Load default";
     loadDefaultBtn.onclick = async () => {
         try {
-            textarea.value = await apiSystemPromptDefault();
+            textarea.value = await apiSystemPromptDefault(modeOf(node));
         } catch (e) {
             alert(`Couldn't load the default: ${e.message}`);
         }
@@ -2681,6 +2923,14 @@ function installSelectionHandlers(node) {
             e.stopImmediatePropagation();
             const { kind, index } = node._mmrpSelected;
             removeRef(node, kind, index);
+        } else if (modeOf(node).reorder && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+            // Image node: move the selected tile one slot. Swallowed like Delete so the
+            // graph does not pan under the user's hand.
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            const { kind, index } = node._mmrpSelected;
+            moveRef(node, kind, index, index + (e.key === "ArrowLeft" ? -1 : 1));
         } else if (e.key === "Escape") {
             node._mmrpSelected = null;
             scheduleDraw(node);
@@ -2700,6 +2950,52 @@ function installSelectionHandlers(node) {
         liveNodes.delete(node);
         if (origOnRemoved) origOnRemoved.apply(this, arguments);
     };
+}
+
+// ---------------------------------------------------------------------------
+// Image node: files dropped on the node become references. Images are uploaded,
+// anything else is refused with a message, and the drop is ALWAYS consumed - left to
+// ComfyUI, a dropped clip would be opened as a workflow or turned into a new loader
+// node, which is not what dropping it on this node meant.
+//
+// Two entry points because a drop can land in two places: on the litegraph canvas
+// (title bar, native widgets) ComfyUI asks node.onDragOver / onDragDrop; on our DOM
+// block the canvas never sees the event, so the block listens itself and
+// preventDefault()s, which ComfyUI's document-level drop handler checks first.
+// ---------------------------------------------------------------------------
+
+function hasDraggedFiles(e) {
+    const types = e && e.dataTransfer && e.dataTransfer.types;
+    return !!types && Array.from(types).includes("Files");
+}
+
+async function dropFiles(node, files) {
+    const all = Array.from(files || []);
+    if (!all.length) return;
+    mlog("drop", { files: all.length });
+    await addFiles(node, "image", all);
+}
+
+function installImageDrop(node) {
+    node.onDragOver = (e) => hasDraggedFiles(e);
+    node.onDragDrop = async (e) => {
+        if (!hasDraggedFiles(e)) return false;
+        await dropFiles(node, e.dataTransfer.files);
+        return true;
+    };
+    const root = node._mmrpBody && node._mmrpBody.root;
+    if (!root) return;
+    root.addEventListener("dragover", (e) => {
+        if (!hasDraggedFiles(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+    });
+    root.addEventListener("drop", (e) => {
+        if (!hasDraggedFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dropFiles(node, e.dataTransfer.files);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2748,16 +3044,18 @@ app.registerExtension({
     name: "MiniMaxRefPack.RefManager",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== NODE_NAME) return;
+        const mode = MODES[nodeData.name];
+        if (!mode) return;
 
         const origOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             origOnNodeCreated?.apply(this, arguments);
             injectStyles();
             const node = this;
+            node._mmrpMode = mode;
 
             const refsWidget = widgetByName(node, "references_json");
-            node._mmrpRefs = parseRefsValue(refsWidget);
+            node._mmrpRefs = parseRefsValue(refsWidget, mode);
             const ivRefs = hideWidget(refsWidget);
 
             const directionWidget = widgetByName(node, "direction");
@@ -2775,8 +3073,8 @@ app.registerExtension({
             const domWidget = node.addDOMWidget("mmrp_block", "custom", bodyEl, { serialize: false });
             node._mmrpDomWidget = domWidget;
             // Constant, by construction: the CSS pins the DOM heights this arithmetic
-            // assumes (uploadsH/promptH/gap), the canvas height is CANVAS_ROWS.height.
-            domWidget.computeSize = () => [CONTENT.width - CONTENT.pad * 2, CONTENT.height];
+            // assumes (uploadsH/promptH/gap), the canvas height is layoutOf().canvas.height.
+            domWidget.computeSize = () => [CONTENT.width - CONTENT.pad * 2, layoutOf(node).height];
             liveNodes.add(node);
 
             node._mmrpBody.directionInput.value = directionWidget ? directionWidget.value || "" : "";
@@ -2788,6 +3086,7 @@ app.registerExtension({
 
             installSizeGuards(node);
             installSelectionHandlers(node);
+            if (mode.dropFiles) installImageDrop(node);
             watchProviderWidget(node);
             syncLocalBtn(node);
             renderNodeBody(node);
@@ -2801,7 +3100,9 @@ app.registerExtension({
                 // The original array is still on `info`, so re-place it by name from the
                 // layout it was actually written in.
                 const saved = info && info.widgets_values;
-                const byName = remapWidgetValues(saved);
+                // The image node never had a pre-0.3.3 layout, and its array is shorter
+                // than any the detector knows, so it is not offered for remapping at all.
+                const byName = modeOf(this).migrateLayout ? remapWidgetValues(saved) : null;
                 if (byName && detectLayout(saved) !== ORDER_0_3_3) {
                     for (const [name, value] of Object.entries(byName)) {
                         setWidget(this, name, value);
@@ -2822,7 +3123,7 @@ app.registerExtension({
                 syncLocalBtn(this);
                 const rw = widgetByName(this, "references_json");
                 stopPreview(this);
-                this._mmrpRefs = parseRefsValue(rw);
+                this._mmrpRefs = parseRefsValue(rw, modeOf(this));
                 const dw = widgetByName(this, "direction");
                 if (this._mmrpBody) this._mmrpBody.directionInput.value = dw ? dw.value || "" : "";
                 this._mmrpSelected = null;

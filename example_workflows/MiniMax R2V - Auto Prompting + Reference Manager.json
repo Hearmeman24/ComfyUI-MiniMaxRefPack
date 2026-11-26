@@ -1424,7 +1424,7 @@
       ],
       "properties": {
         "cnr_id": "comfyui-minimaxrefpack",
-        "ver": "0.3.5",
+        "ver": "0.4.0",
         "Node name for S&R": "MiniMaxH3ReferencePack"
       },
       "widgets_values": [
