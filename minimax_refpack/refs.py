@@ -204,6 +204,22 @@ class ReferenceSet:
                     f"MiniMax H3 accepts at most {cap} reference {kind}s, got {n}"
                 )
 
+    def validate_kinds(self, allowed: Iterable[str]) -> None:
+        """Raise unless every reference is one of `allowed`, naming the first that is not.
+
+        The image-edit node's server-side gate. Its UI only ever offers images, but
+        `references_json` is a plain widget value and a /prompt POST can carry anything,
+        so the node that has no video or audio sockets refuses such a set outright rather
+        than quietly dropping the reference the user thought they attached.
+        """
+        allowed = tuple(allowed)
+        for r in self.references:
+            if r.kind not in allowed:
+                raise ReferenceError(
+                    f"this node takes {' and '.join(k + 's' for k in allowed)} only, "
+                    f"got a {r.kind} reference ({r.file})"
+                )
+
     def missing_files(self, input_dir: str) -> list[str]:
         """Filenames that do not resolve under the ComfyUI input directory, in set order."""
         missing = []
@@ -291,6 +307,30 @@ def output_types() -> tuple[str, ...]:
     types += ["AUDIO"] * MAX_AUDIOS
     types += ["STRING"] * len(_STRING_OUTPUTS)
     return tuple(types)
+
+
+# ---- the image-edit node's outputs --------------------------------------------
+#
+# MiniMaxH3ImageReferencePack feeds core's MiniMaxH3ImageConditioning, whose `images`
+# Autogrow (image_1..image_N, nodes_minimax_h3.py:758) takes image_1 as the picture to
+# EDIT and the rest as references, tagged <Picture n> in slot order with empty slots
+# skipped (:727-728) - the same compaction the image half of assign_tags() models.
+# Same APPEND-ONLY rule as output_names(): this tuple is a wire format.
+
+IMAGE_EDIT_KINDS: tuple[Kind, ...] = ("image",)
+
+
+def image_output_names() -> tuple[str, ...]:
+    """image_1..9, prompt, debug - the image-edit node's 11 outputs, in order."""
+    return tuple([f"image_{i}" for i in range(1, MAX_IMAGES + 1)] + list(_STRING_OUTPUTS))
+
+
+def image_output_types() -> tuple[str, ...]:
+    return tuple(["IMAGE"] * MAX_IMAGES + ["STRING"] * len(_STRING_OUTPUTS))
+
+
+def empty_image_outputs() -> list[Any]:
+    return [None] * MAX_IMAGES + [""] * len(_STRING_OUTPUTS)
 
 
 def slot_index(name: str) -> int:

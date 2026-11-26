@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-minimaxrefpack"
-description = "Reference management, portable configs and VLM prompt writing for MiniMax H3 Reference-to-Video, with a dedicated object/character replacement mode."
-version = "0.3.5"
+description = "Reference management, portable configs and VLM prompt writing for MiniMax H3 Reference-to-Video (with a dedicated object/character replacement mode) and MiniMax H3 Image editing."
+version = "0.4.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = ["requests"]

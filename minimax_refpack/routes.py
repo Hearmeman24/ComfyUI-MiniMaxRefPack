@@ -136,7 +136,13 @@ async def list_files_route(request: web.Request) -> web.Response:
 async def system_prompt_route(request: web.Request) -> web.Response:
     """Read-only: the modal's "Load default" button. The user's edit lives in the
     workflow's `system_prompt` widget, never written back here - there is no write
-    route for this on purpose."""
+    route for this on purpose.
+
+    `?mode=image_edit` serves the image-edit node's packaged prompt. Any other value, or
+    none, is the original node's default, so its requests are answered exactly as before
+    and a typo can never point the modal at a file outside the package."""
+    if request.query.get("mode") == prompt.IMAGE_EDIT:
+        return web.json_response({"default": prompt._read_system_prompt(prompt.IMAGE_EDIT)})
     return web.json_response({"default": prompt._read_system_prompt()})
 
 

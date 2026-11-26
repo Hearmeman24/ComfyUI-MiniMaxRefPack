@@ -62,6 +62,7 @@ REASONING_EFFORTS = ("none", "low", "medium", "high")
 
 _SYSTEM_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
 _REPLACEMENT_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt_replacement.md")
+_IMAGE_EDIT_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt_image_edit.md")
 
 # Two registers, one per job. "standard" is the six-section Ref2VA writer; "replacement"
 # swaps one thing in a reference video for the thing in a reference image and changes
@@ -69,6 +70,13 @@ _REPLACEMENT_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_promp
 # are ~22KB of hard formatting mandates and putting both in context produces hybrids.
 MODES = ("auto", "standard", "replacement")
 _PROMPT_PATHS = {"standard": _SYSTEM_PROMPT_PATH, "replacement": _REPLACEMENT_PROMPT_PATH}
+
+# The image-edit node's register (MiniMaxH3ImageReferencePack). Deliberately NOT in MODES:
+# MODES is the video node's `job_type` combo, and that node has no business writing a
+# still-image edit brief. It is only ever passed explicitly, never classified into, so
+# `auto` can never land on it.
+IMAGE_EDIT = "image_edit"
+_PROMPT_PATHS[IMAGE_EDIT] = _IMAGE_EDIT_PROMPT_PATH
 
 # Free models were measured and rejected for this job (2026-08-15): gemma-4-31b:free
 # returned HTTP 429 on every call, gpt-oss-20b:free returned no `content` field.
@@ -463,6 +471,7 @@ def _target_format_lines(width: int, height: int, length_seconds: float) -> list
 def _build_content(
     references, input_dir: str, direction: str,
     *, width: int = 0, height: int = 0, length_seconds: float = 0.0, accepts=None,
+    edit_target: bool = False,
 ) -> list[dict]:
     """`references` is a refs.ReferenceSet; untyped here to avoid importing refs.py
     for a type hint alone (nothing else in this module needs it).
@@ -485,7 +494,7 @@ def _build_content(
 
     # Two manifest styles, deliberately. The OpenRouter path is byte-for-byte what it has
     # always been, because it works and its A/B against the concise style has not run yet
-    # (Aviv, 2026-08-17). The degraded path uses the concise style, where the repetition
+    # (maintainer, 2026-08-17). The degraded path uses the concise style, where the repetition
     # actually hurt: with six frames per clip the old format repeated the filename seven
     # times - 750+ characters of noise for a 108-char name - and, worse, six separate
     # per-frame labels read as six separate items, which is exactly the mis-grouping a
@@ -501,8 +510,14 @@ def _build_content(
     for t in tagged:
         path = os.path.join(input_dir, t.file)
         label = t.tag if t.audio_tag is None else f"{t.tag} {t.audio_tag}"
+        # Image edit only: <Picture 1> is the picture being edited, not one reference
+        # among equals, and the writer has to know which one before it can describe a
+        # change to it. Everything else about the layout is the same.
+        target = edit_target and t.kind == "image" and t.slot == 1
         if concise:
             files.append(f"{t.tag}={t.file}")
+        elif target:
+            manifest.append(f"{label}: {t.file} (the image to edit)")
         else:
             manifest.append(f"{label}: {t.file}")
 
@@ -510,9 +525,16 @@ def _build_content(
         # the media the pack's sockets will emit - never the untrimmed original.
         if t.kind == "image":
             tensor = media.load_image(path, crop=t.ref.crop)
-            if concise:
+            if concise and target:
+                groups["Images"].append(f"{t.tag} (the image to edit)")
+                parts.append(_text_part(f"{t.tag} - the image to edit:"))
+            elif concise:
                 groups["Images"].append(t.tag)
                 parts.append(_text_part(f"{t.tag}:"))
+            elif target:
+                parts.append(_text_part(
+                    f"image_reference {t.tag} ({t.file}) - the image to edit, the next image:"
+                ))
             else:
                 parts.append(_text_part(f"image_reference {t.tag} ({t.file}) - the next image:"))
             parts.append(_image_part(_tensor_to_jpeg_b64(tensor)))
@@ -751,7 +773,7 @@ def write_prompt(
 
     # job_type picks the register. "auto" asks a cheap classifier; anything else is taken
     # at its word and makes no extra call. An explicit system_prompt overrides all of it.
-    resolved = job_type if job_type in ("standard", "replacement") else "standard"
+    resolved = job_type if job_type in ("standard", "replacement", IMAGE_EDIT) else "standard"
     if job_type == "auto":
         # Off OpenRouter there is no cheap second model to reach for, so the writer's own
         # model classifies. Same endpoint, same key, so "local" stays local.
@@ -766,10 +788,16 @@ def write_prompt(
     # at call time (not import time) so an edit on disk lands on the next queue.
     if not (system_prompt and system_prompt.strip()):
         system_prompt = _read_system_prompt(resolved)
+    image_edit = resolved == IMAGE_EDIT
     content = _build_content(
         references, input_dir, direction,
         width=width, height=height, length_seconds=length_seconds, accepts=ep.accepts,
+        edit_target=image_edit,
     )
+    # A local endpoint takes text and images, which is everything an image-edit set can
+    # hold, so nothing is degraded there and saying otherwise would send the reader of
+    # `debug` looking for video frames that were never part of the job.
+    degraded = ep.degrades and not image_edit
 
     payload = {
         "model": model,
@@ -793,9 +821,12 @@ def write_prompt(
     if debug is not None:
         # Exactly ONE entry: the node reads debug_sink[0]. The routing line rides on top
         # of the payload render rather than being a second entry.
-        routing = f"job_type: {job_type} -> {resolved} (system prompt: {resolved}.md)"
+        if image_edit:
+            routing = f"job_type: {job_type} (system prompt: {os.path.basename(_IMAGE_EDIT_PROMPT_PATH)})"
+        else:
+            routing = f"job_type: {job_type} -> {resolved} (system prompt: {resolved}.md)"
         routing += f"\nendpoint: {ep.describe()}"
-        if ep.degrades:
+        if degraded:
             missing = ", ".join(sorted(_DEFAULT_ENDPOINT.accepts - ep.accepts))
             routing += (
                 f"\nDEGRADED: this endpoint does not accept {missing}. Videos were sent "
@@ -807,7 +838,7 @@ def write_prompt(
     with logs.timed(
         "chat", endpoint=ep.describe(), model=model, job_type=resolved,
         effort=reasoning_effort if ep.sends_reasoning else None,
-        degraded=ep.degrades or None, timeout_s=ep.chat_timeout,
+        degraded=degraded or None, timeout_s=ep.chat_timeout,
         parts=len(parts), bytes=_payload_bytes(parts),
     ) as fields:
         resp = _post_chat(key, payload, ep)

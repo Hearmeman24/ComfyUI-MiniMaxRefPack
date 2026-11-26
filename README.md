@@ -19,6 +19,21 @@ One node that manages every reference for **MiniMax H3 Reference to Video**, wri
 - **Honest about what it sent.** A local server takes text and images but not video or audio, so a clip goes as sampled frames with no sound. The node says so on the canvas, in the log and in `debug`, and it tells the prompt writer not to describe motion or voices it never received.
 - **Prompt passthrough.** Set `prompt_provider` to `none` and your direction text goes straight to the `prompt` output with no API call.
 
+## MiniMax Image References Manager
+
+A second node in the same pack, for **MiniMax H3 Image** editing. It is the same reference manager restricted to still images, and it feeds core's `MiniMax H3 Image Conditioning` node.
+
+- **Images only.** One row, up to 9 images. The picker, drag and drop onto the node, and the server all refuse video and audio, so a crafted request cannot slip a clip in either.
+- **`<Picture 1>` is the image to edit.** Its tile says **edit target**. Every image after it is a reference: `<Picture 2>`, `<Picture 3>` and so on. The tags follow the order, so deleting or moving a tile retags the rest.
+- **Pick a different image to edit** with the target chip on any other tile, or select a tile and move it with the arrow keys.
+- **11 outputs, wired once:** `image_1` to `image_9`, then `prompt`, then `debug`. Wire `image_1..9` into the conditioning node's `image_1..9` and `prompt` into its `prompt`.
+- **Auto prompting for edits.** On `openrouter` or `local` a vision model looks at your images and writes the edit prompt MiniMax H3 Image expects: who and what each `<Picture N>` contributes, what is kept, and only what changes. The packaged instructions are `minimax_refpack/system_prompt_image_edit.md`, editable per workflow from the settings modal. On `none` your direction goes straight to `prompt`.
+- **Everything else is the same:** previews, the crop editor, `max_reference_edge`, the Local LLM scan, the settings modal, `debug`, and save/load config.
+
+Configs carry the node type that saved them. An image config only loads into an Image References Manager, and a References Manager config only into a References Manager; the other way round is refused with a message that says which node to use. Loading only the images was ruled out on purpose: a video config's first image is not the picture to edit, and its direction is a scene brief, not an edit.
+
+Example: drag `example_workflows/MiniMax H3 Image - Edit - Reference Manager.json` onto the canvas. It brings `<Picture 1>` up to about 4 MP for the output size, as the stock ComfyUI edit workflow does.
+
 ## Do I need an API key?
 
 No. `prompt_provider` picks who writes the prompt, and two of its three settings need no account at all.

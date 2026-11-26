@@ -12,6 +12,7 @@ VAE/tokenizer.
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import os
 import time
 
@@ -99,7 +100,7 @@ class MiniMaxH3ReferencePack:
     # POSITIONALLY, so this list is a wire format as much as a layout. Reordering it (as
     # happened for 0.3.3) scrambles every workflow saved before the change unless
     # web/refpack.js remaps them on load - see remapWidgetValues there, and keep the two
-    # in step. Grouped by decision flow, agreed with Aviv 2026-08-17: the mode first,
+    # in step. Grouped by decision flow, agreed with the maintainer 2026-08-17: the mode first,
     # then that mode's settings, then what to write, then the target video, then how the
     # references are prepared.
     #
@@ -409,7 +410,227 @@ class MiniMaxH3ReferencePack:
         return tuple(outputs)
 
 
-NODE_CLASS_MAPPINGS = {"MiniMaxH3ReferencePack": MiniMaxH3ReferencePack}
-# The class key stays MiniMaxH3ReferencePack forever — it is what saved workflows
-# reference. Only the human-facing label changes.
-NODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ReferencePack": "MiniMax References Manager"}
+# ---- the image-edit node ---------------------------------------------------------
+#
+# The same reference manager restricted to stills, for MiniMax H3 Image editing. It
+# feeds core's MiniMaxH3ImageConditioning (comfy_extras/nodes_minimax_h3.py:740), whose
+# `images` Autogrow takes image_1 as the picture to EDIT and the rest as references, all
+# addressed in the prompt as <Picture n>. Empty slots go out as None, which that node
+# drops before it numbers anything (:728), exactly like the video node's groups.
+#
+# Shares every helper above and every module this file imports; only the widget list,
+# the outputs and the register differ. The inputs are DERIVED from the video node's own
+# declarations rather than retyped, so a fix to a shared field's options lands on both.
+
+# Widget order, and so the wire format of widgets_values: the video node's order with
+# its video-only fields (job_type, width, height, length_seconds) left out. Hidden
+# fields first, then the provider and its two groups, then the reference cap - the same
+# grouping web/refpack.js's provider-visibility code already understands.
+_IMAGE_EDIT_WIDGETS = (
+    "references_json", "system_prompt", "prompt_provider",
+    "openrouter_api_key", "openrouter_model", "reasoning_effort",
+    "api_base", "local_model_slug", "max_reference_edge",
+)
+
+# Tooltips that mention video or audio, rewritten for a node that has neither.
+_IMAGE_EDIT_TOOLTIPS = {
+    "system_prompt": "Prompt-writer system prompt, editable per-workflow via the settings "
+                     "modal. Blank falls back to the packaged image-edit default.",
+    "prompt_provider": "Who writes the prompt. openrouter = the hosted API (needs a key). "
+                       "local = any OpenAI-compatible vision server, set api_base below "
+                       "(Ollama, LM Studio, llama.cpp, vLLM). none = no call, your "
+                       "direction text passes through verbatim.",
+    "max_reference_edge": "Downscale a reference image whose long edge exceeds this "
+                          "(0 = off). Never upscales.",
+}
+
+
+def _is_image_file(name: str) -> bool:
+    """By extension, the same way ComfyUI's own input pickers classify files
+    (folder_paths.filter_files_content_types). Strict about it: media._guess_kind calls
+    anything that is not video or audio an image, which is right for a thumbnail and
+    wrong for a gate."""
+    mime, _ = mimetypes.guess_type(name, strict=False)
+    # SVG is an image/* type that PIL cannot decode, so it would only fail later.
+    return bool(mime and mime.startswith("image/") and mime != "image/svg+xml")
+
+
+def _with_tooltip(entry, tooltip):
+    kind, options = entry
+    return (kind, {**options, "tooltip": tooltip})
+
+
+class MiniMaxH3ImageReferencePack:
+    """Owns a set of still images and fans it out to image_1..9 plus a written edit
+    prompt. Wire image_1..9 and `prompt` into MiniMaxH3ImageConditioning once; image_1
+    is the picture to edit, every later image is a reference."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        shared = MiniMaxH3ReferencePack.INPUT_TYPES()["optional"]
+        optional = {}
+        for name in _IMAGE_EDIT_WIDGETS:
+            entry = shared[name]
+            if name in _IMAGE_EDIT_TOOLTIPS:
+                entry = _with_tooltip(entry, _IMAGE_EDIT_TOOLTIPS[name])
+            optional[name] = entry
+        return {
+            "required": {
+                "direction": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "The edit to make to <Picture 1>, in your own words. With "
+                               "prompt_provider none it becomes the prompt verbatim.",
+                }),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = refs.image_output_types()
+    RETURN_NAMES = refs.image_output_names()
+    FUNCTION = "build"
+    CATEGORY = "MiniMax H3"
+
+    @classmethod
+    def IS_CHANGED(
+        cls, direction="", references_json="", system_prompt="",
+        prompt_provider=endpoint.DEFAULT_PROVIDER, openrouter_api_key="",
+        openrouter_model="", reasoning_effort=prompt.DEFAULT_REASONING_EFFORT,
+        api_base="", local_model_slug="", max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE,
+        **kwargs
+    ):
+        import folder_paths
+
+        reference_set = refs.ReferenceSet.from_json(references_json)
+        sig = _files_signature(reference_set, folder_paths.get_input_directory())
+        # Same reasoning as the video node's key, minus the fields this node lacks:
+        # everything that changes what is loaded, where the call goes or what it says.
+        return "|".join([
+            sig, direction, str(openrouter_model), references_json, system_prompt,
+            endpoint.normalize_provider(prompt_provider), str(reasoning_effort),
+            str(max_reference_edge), str(api_base), str(local_model_slug),
+        ])
+
+    def build(
+        self, direction="", references_json="", system_prompt="",
+        prompt_provider=endpoint.DEFAULT_PROVIDER, openrouter_api_key="",
+        openrouter_model="", reasoning_effort=prompt.DEFAULT_REASONING_EFFORT,
+        api_base="", local_model_slug="", max_reference_edge=DEFAULT_MAX_REFERENCE_EDGE,
+    ):
+        import folder_paths
+
+        started = time.perf_counter()
+        reference_set = refs.ReferenceSet.from_json(references_json)
+        # The server-side half of "images only". The UI never offers a video or audio
+        # upload, but references_json is just a widget value and a /prompt POST can carry
+        # anything. This node has no socket to put a clip on, so a clip is an error the
+        # user sees rather than a reference that silently vanishes.
+        reference_set.validate_kinds(refs.IMAGE_EDIT_KINDS)
+        reference_set.validate()
+
+        input_dir = folder_paths.get_input_directory()
+        missing = reference_set.missing_files(input_dir)
+        if missing:
+            raise ValueError(
+                "reference file(s) not found in the ComfyUI input directory: " + ", ".join(missing)
+            )
+        # kind is a label the client writes. Check the FILE too, so "image" pointing at
+        # an .mp4 fails here with a sentence instead of deep inside PIL.
+        not_images = [r.file for r in reference_set.references if not _is_image_file(r.file)]
+        if not_images:
+            raise ValueError("this node takes images only, but these are not: " + ", ".join(not_images))
+
+        provider = endpoint.normalize_provider(prompt_provider)
+        model = _model_for(provider, openrouter_model, local_model_slug)
+        tagged = reference_set.assign_tags()
+
+        logs.log(
+            "build", node="image_edit", images=len(tagged), cap=max_reference_edge or None,
+            provider=provider, api_base=api_base or None, model=model,
+        )
+
+        outputs = refs.empty_image_outputs()
+        for t in tagged:
+            logs.log("reference", kind=t.kind, slot=t.slot, tag=t.tag, file=t.file,
+                     crop=t.ref.crop, edit_target=t.slot == 1)
+            outputs[t.slot - 1] = media.load_image(
+                os.path.join(input_dir, t.file), crop=t.ref.crop, max_edge=max_reference_edge
+            )
+
+        def describe(t):
+            return f"{t.tag} {t.file}" + (" (the image to edit)" if t.slot == 1 else "")
+
+        debug_header = [
+            "=== MiniMax Image References Manager ===",
+            f"prompt_provider: {provider}" + (f" ({api_base})" if provider == "local" else ""),
+            f"model: {model}"
+            + (" (local_model_slug)" if provider == "local" else " (openrouter_model)"),
+            f"reasoning_effort: {reasoning_effort}",
+            f"max_reference_edge: {max_reference_edge or 'off'}",
+            f"system_prompt: {'workflow override' if (system_prompt or '').strip() else 'packaged default'}",
+            f"references: {len(tagged)} ({', '.join(describe(t) for t in tagged) or 'none'})",
+        ]
+
+        prompt_text = ""
+        debug_sink: list[str] = []
+        if provider == "none":
+            prompt_text = direction
+            logs.log("prompt_skipped", reason="prompt_provider=none", chars=len(direction))
+            debug_header += [
+                "",
+                "Auto-prompting is OFF - no request was made. `direction` passes through verbatim:",
+                direction,
+            ]
+        elif reference_set.is_empty() and not (direction or "").strip():
+            logs.log("prompt_skipped", reason="no references and no direction")
+            debug_header += [
+                "",
+                "No references and no direction - nothing to write from; no request was made.",
+            ]
+        else:
+            if reference_set.is_empty():
+                debug_header.append(
+                    "note: no images attached - nothing to edit, the prompt is written "
+                    "from the direction alone"
+                )
+            try:
+                prompt_text = prompt.write_prompt(
+                    references=reference_set, input_dir=input_dir, direction=direction,
+                    api_key=openrouter_api_key, model=model, system_prompt=system_prompt,
+                    reasoning_effort=reasoning_effort, job_type=prompt.IMAGE_EDIT,
+                    debug=debug_sink, provider=provider, api_base=api_base,
+                )
+            except ValueError as e:
+                if "api_base" not in str(e):
+                    raise
+                raise ValueError(f"prompt generation failed: {e}") from e
+            except prompt.PromptError as e:
+                msg = str(e)
+                if openrouter_api_key and openrouter_api_key in msg:
+                    msg = msg.replace(openrouter_api_key, "***")
+                raise ValueError(f"prompt generation failed: {msg}") from e
+
+        debug_text = "\n".join(debug_header)
+        if debug_sink:
+            where = "OpenRouter" if provider == "openrouter" else api_base
+            debug_text += f"\n\n--- payload sent to {where} ---\n" + debug_sink[0]
+        if openrouter_api_key and openrouter_api_key in debug_text:
+            debug_text = debug_text.replace(openrouter_api_key, "***")
+
+        outputs[refs.MAX_IMAGES] = prompt_text
+        outputs[refs.MAX_IMAGES + 1] = debug_text
+        logs.log("build_done", node="image_edit", prompt_chars=len(prompt_text),
+                 ms=(time.perf_counter() - started) * 1000.0)
+        return tuple(outputs)
+
+
+# The class keys stay as they are forever - they are what saved workflows reference.
+# Only the human-facing labels may change.
+NODE_CLASS_MAPPINGS = {
+    "MiniMaxH3ReferencePack": MiniMaxH3ReferencePack,
+    "MiniMaxH3ImageReferencePack": MiniMaxH3ImageReferencePack,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "MiniMaxH3ReferencePack": "MiniMax References Manager",
+    "MiniMaxH3ImageReferencePack": "MiniMax Image References Manager",
+}

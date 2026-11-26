@@ -1,6 +1,6 @@
 """What goes on the wire when the endpoint cannot take everything.
 
-The rule, set with Aviv 2026-08-17: a video becomes still frames, NO audio is sent at all
+The rule, set with the maintainer 2026-08-17: a video becomes still frames, NO audio is sent at all
 (not the video's soundtrack, not a standalone clip), and the manifest says so. Tags never
 move, because they are the contract between this prompt and the node's 20 sockets.
 """

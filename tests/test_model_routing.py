@@ -148,7 +148,7 @@ def test_the_new_name_beats_the_legacy_one_when_both_arrive(env, sent):
 def test_the_widgets_are_named_and_ordered_as_declared():
     spec = nodes.MiniMaxH3ReferencePack.INPUT_TYPES()
     assert list(spec["required"]) == ["direction"]
-    # Grouped by decision flow (Aviv, 2026-08-17): the mode, then that mode's settings,
+    # Grouped by decision flow (maintainer, 2026-08-17): the mode, then that mode's settings,
     # then what to write, then the target video, then reference prep. This order is a
     # WIRE FORMAT - widgets_values is positional - so changing it means updating
     # ORDER_0_3_3 in web/refpack.js too, which test_migration.py asserts.
